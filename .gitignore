@@ -1,0 +1,16 @@
+imagenet_mini/
+/__pycache__
+/imagenet-mini
+/input_stimuli
+/.ipynb_checkpoints
+.git
+/fig1
+/endless_motion.ipynb
+data_cosine.pt
+data.pt
+state.pt
+cute_grid.ipybn
+/input_stimuli_1.2
+/input_stimuli_2.0
+/input_stimuli_1.5
+/input_stimuli
