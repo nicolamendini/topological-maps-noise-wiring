@@ -107,7 +107,7 @@ class NeuralSheet(nn.Module):
         self.rf_grids = get_grids(input_size, input_size, self.rf_size, sheet_size, device=device)
 
         # /4 for topo map
-        self.env_std = R_long / 1
+        self.env_std = R_long / 0.5
         self.envelope = generate_gaussians(sheet_size, sheet_size, self.env_std, offset=self.window//2).to(device)
         self.rolled_envelope = self.envelope.clone().detach()
 
@@ -286,7 +286,7 @@ class NeuralSheet(nn.Module):
             self.thresholds -= (thresh_update/self.homeo_target) * self.homeo_lr * 1e-1
 
             if self.R_long:
-                self.std_target = 0.215
+                self.std_target = 0.22
                 target_cf = self.long_range_inh
                 masses = (np.pi * self.R_long**2).round()
                 self.spread = get_masses_and_spreads(target_cf, norm_flag=True, masses=masses)[1].view(-1,1,1,1)
@@ -343,7 +343,7 @@ class NeuralSheet(nn.Module):
             lri = sampling_cf[:,:,self.window//2:-self.window//2+1,self.window//2:-self.window//2+1]
             lri = lri / (lri.sum([2,3], keepdim=True) + 1e-11)
 
-            sampling_cf = sampling_cf * self.rolled_envelope
+            #sampling_cf = sampling_cf * self.rolled_envelope
 
             #lre_masks = get_sparsity_masks(sampling_cf,self.long_cutoff, 1/3)
             #lre = sampling_cf * lre_masks

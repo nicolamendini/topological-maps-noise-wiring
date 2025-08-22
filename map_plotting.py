@@ -145,8 +145,8 @@ def show_map(model, network, random_sample=None):
     titles = [
         "Current Input", "Afferent Weights", "Current Aff Response", "Inhibitory weights",
         "Lateral correlations", "Current Response", "Current Response Histogram",
-        "Orientation Map", "Orientation Histogram", "LRE", "L4 Afferent", "L4 Histogram",
-        "Reconstruction", "Thresholds", "STD FRs", "Mean Frs"
+        "Orientation Map", "Orientation Histogram", "LRE", "Fourier domain", "Mean Histogram",
+        "Reconstruction", "Thresholds", "Excitatory weights", "Mean Frs"
     ]
 
     # Displaying the model's current input
@@ -160,7 +160,7 @@ def show_map(model, network, random_sample=None):
     # Afferent weights of a random sample
     aff_weights = model.get_aff_weights()[random_sample, 0] #- model.afferent_weights[random_sample, 1]
     aff_weights[0,0] = 0
-    plt.subplot(4, 4, 13)
+    plt.subplot(4, 4, 12)
     plt.imshow(aff_weights.detach().cpu())
     plt.title(titles[1])
 
@@ -168,7 +168,7 @@ def show_map(model, network, random_sample=None):
     net_afferent = model.current_afferent[0,0].detach().cpu() - model.thresholds[0,0].detach().cpu()
     net_afferent_bar = net_afferent + 0
     net_afferent_bar[0,0] = 0
-    plt.subplot(4, 4, 3)
+    plt.subplot(4, 4, 2)
     plt.imshow(net_afferent_bar)
     plt.title(titles[2])
 
@@ -206,54 +206,38 @@ def show_map(model, network, random_sample=None):
     phase_map = phase_map.reshape(M, M).cpu()
     
     # Orientation map
-    plt.subplot(4, 4, 8)
+    plt.subplot(4, 4, 9)
     plt.imshow(ori_map, cmap='hsv')
     plt.title(titles[7])
 
     # Orientation histogram
-    plt.subplot(4, 4, 9)
+    plt.subplot(4, 4, 10)
     hist_map = ori_map.flatten()
     plt.hist(hist_map, bins=15)
     plt.title(titles[8])
 
-    # LRE
-    plt.subplot(4, 4, 10)
-    if model.long_range_exc.any():
-        plt.imshow(model.long_range_exc[random_sample,0].cpu())
-    plt.title(titles[9])
-
     # Retinotopic Bias
     plt.subplot(4, 4, 11)
-    detectors = get_detectors(model.rf_size, 1)
-    plt.imshow(detectors[0,0].cpu())
+    _,ring,_ = get_typical_dist_fourier(ori_map, 10)
+    plt.imshow(ring.cpu())
     plt.title(titles[10])
 
-    plt.subplot(4, 4, 12)
+    plt.subplot(4, 4, 8)
     plt.stairs(model.avg_hist.int(), torch.linspace(0,1,11), fill=True)
     plt.title(titles[11])
 
     reco_input = network['activ'](network['model'](model.current_response))[0,0].detach().cpu()
     # nn reconstruction
-    plt.subplot(4, 4, 2)
+    plt.subplot(4, 4, 3)
     plt.imshow(reco_input)
     plt.title(titles[12])
 
-    # afferent with thresholds
-    plt.subplot(4, 4, 14)
-    plt.imshow(model.thresholds[0,0].cpu())
-    plt.title(titles[13])
-
     # thresholds
     #thresholds[0,0] = 0
-    plt.subplot(4, 4, 15)
+    plt.subplot(4, 4, 3)
     plt.imshow(model.short_range_exc[random_sample,0].cpu())
     plt.title(titles[14])
 
-    # thresholds
-    plt.subplot(4, 4, 16)
-    mean_fr = model.mean_fr[0,0].cpu()
-    plt.imshow(mean_fr)
-    plt.title(titles[15])
 
     print('Net Afferent Max: {:.3f}, Net Afferent Min: {:.3f}'. format(net_afferent.max(), net_afferent.min()))
     print('L4 Thresholds Max: {:.3f}, L4 Thresholds Min: {:.3f}'. format(model.thresholds.max(), model.thresholds.min()))
@@ -292,8 +276,7 @@ def plot_absolute_phases(model,target_channel=0):
     topography = topography.reshape(2,-1)
     topography = (topography.T.float() + c).T
 
-    plt.figure(figsize=(9,9))
-    plt.scatter(topography[0],topography[1])
+    plt.scatter(topography[0],topography[1], s=5)
 
     # plotting the lines of the grid
     topography = topography.T.view(sheet_units,sheet_units,2)
@@ -301,6 +284,41 @@ def plot_absolute_phases(model,target_channel=0):
     segs2 = segs1.permute(1,0,2)
     plt.gca().add_collection(LineCollection(segs1))
     plt.gca().add_collection(LineCollection(segs2))
+
+
+def plot_mexican_hat(Z, r=None):
+    # Get dimensions
+    h, w = Z.shape
+    
+    # Generate X and Y grid centered at 0 (so circle mask is symmetric)
+    x = np.linspace(-(w-1)/2, (w-1)/2, w)
+    y = np.linspace(-(h-1)/2, (h-1)/2, h)
+    X, Y = np.meshgrid(x, y)
+    
+    # Create a mask for outside the circle
+    if r is not None:
+        mask = np.sqrt(X**2 + Y**2) > r
+        Z = Z.clone()
+        Z[mask] = np.nan  # masked region
+
+    # Set up figure and 3D axis
+    fig = plt.figure(figsize=(8, 6))
+    ax = fig.add_subplot(111, projection='3d', facecolor='white')
+
+    # Colormap (blue for negative, red for positive)
+    cmap = cm.coolwarm
+    norm = plt.Normalize(vmin=np.nanmin(Z), vmax=np.nanmax(Z))
+
+    # Plot surface (NaNs are simply skipped -> background shows through)
+    surf = ax.plot_surface(X, Y, Z, facecolors=cmap(norm(Z)),
+                           rstride=1, cstride=1, antialiased=True)
+
+    # Remove axes for a clean look
+    ax.set_axis_off()
+    
+    # Set camera view
+    ax.view_init(elev=20, azim=80)
+
     plt.tight_layout()
     plt.show()
     

@@ -32,13 +32,13 @@ def collect_stats(salt_and_pepper=True, accdim=False):
 
     dataloader = create_dataloader(root_dir, crop_size, batch_size, num_workers)
     
-    trials = 10
-    n_conditions = 10
-    epochs = 1
+    trials = 5
+    n_conditions = 5
+    epochs = 2
     n_samples = 3
     
-    trialvar = np.sqrt(np.linspace(5**2, 20**2, trials))
-    sizesvar = [56]
+    trialvar = np.sqrt(np.linspace(5**2, 18**2, trials))
+    sizesvar = [40]
     N_CODES = sizesvar[-1]**2 + 100
     noise_conditions = torch.linspace(0, 0.5, n_conditions)
     plastic_sparsity_vals = torch.linspace(1, 20, n_conditions)
@@ -88,7 +88,7 @@ def collect_stats(salt_and_pepper=True, accdim=False):
                 model.range_norm = 0.16
             else:
                 model = NeuralSheet(sizesvar[s], crop_size, R_rf, R_pat=trialvar[t], device=device).to(device)
-                model.range_norm = 0.10
+                model.range_norm = 0.12
                 
             lr = 1e-3
             network = init_nn(sizesvar[s], crop_size)

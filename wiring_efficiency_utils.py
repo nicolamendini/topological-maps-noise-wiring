@@ -265,7 +265,6 @@ def init_nn(input_size, output_size, device='cuda'):
         ('flatten', 1, input_size**2),
         ('dense', output_size**2, input_size**2),
         ('relu', ),
-        ('dense', output_size**2, output_size**2),
         ('unflatten', 1, output_size)
     ]
     
@@ -278,13 +277,35 @@ def init_nn(input_size, output_size, device='cuda'):
     
     return network
 
+def init_nn_audio(input_size, output_size, device='cuda'):
+
+    network = {}
+    
+    network['structure'] = [
+        ('flatten', 1, input_size),
+        ('dense', output_size, input_size),
+        ('relu', ),
+        ('dense', output_size, output_size)
+    ]
+    
+    network['model'] = nn_template.Network(network['structure'], device=device, bias=False)
+    params_list = [list(network['model'].layers[l].parameters()) for l in range(len(network['structure']))]
+    params_list = sum(params_list, [])
+    
+    network['optim'] = torch.optim.Adam(params_list, lr=1e-3)
+    network['activ'] = torch.sigmoid
+    
+    return network
+
 def nn_loss(network, true_input, reco_input):
 
     mse = ((true_input - reco_input)**2).mean([1,2,3])
-    
-    loss = mse.mean()
+
+    l1 = sum([list(network['model'].layers[l].parameters())[0].abs().sum() if list(network['model'].layers[l].parameters()) else 0 for l in range(len(network['structure']))])
+
+    loss = mse.mean() + l1 * 1e-7
     loss_std = mse.std()
-        
+    
     return loss, loss_std
 
 # Function to compute the Laplacian Of Gaussian Operator
@@ -531,18 +552,20 @@ def get_pca_dimensions(code_tracker, n_samps):
 
     print('measuring dimensionality, number of Nan found: ' + str(int(mask.sum())))
 
-    size = code_tracker.shape[-1]
+    w = code_tracker.shape[-1]
+    h = code_tracker.shape[-2]
     
-    pca = PCA(n_components=size**2)
-    pca.fit(code_tracker.cpu().view(-1,size**2))
+    pca = PCA(n_components=w*h)
+    pca.fit(code_tracker.cpu().view(-1,w*h))
     eff_dim = (pca.explained_variance_ratio_.cumsum() < 0.95).sum()
     
-    comp_sampled = torch.tensor(pca.components_).view(size,size,size**2)
-    step = size // n_samps
-    comp_sampled = comp_sampled[::step, ::step][:n_samps, :n_samps]
+    comp_sampled = torch.tensor(pca.components_).view(w,h,w*h)
+    step_w = w // n_samps
+    step_h = h // n_samps
+    comp_sampled = comp_sampled[::step_w, ::step_h][:n_samps, :n_samps]
     
-    comp_sampled = comp_sampled.view(n_samps, n_samps, size, size)
-    comp_sampled = comp_sampled.permute(0,2,1,3).reshape(n_samps*size, n_samps*size)
+    comp_sampled = comp_sampled.view(n_samps, n_samps, w, h)
+    comp_sampled = comp_sampled.permute(0,2,1,3).reshape(n_samps*w, n_samps*h)
         
     return eff_dim, comp_sampled
 

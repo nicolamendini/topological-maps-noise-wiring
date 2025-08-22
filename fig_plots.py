@@ -82,9 +82,11 @@ def make_fig1_plots(data_sp, data_topo):
 
     # ----------------------- animals lateral connectivity
 
-    labels = ['gh', 'rat', 'squ', 'rab', 'ts', 'cat', 'fer', 'sm', 'sm(V2)', 'om', ' mac', ' mac(V2)']
-    connectivity_length = [153000,  153000, 539000, 539000, 1487000, 2389000, 2389000, 1182000, 2224000, 1182000, 5970000, 5998000]
-    v1_lambda = np.array([4, 4, 4, 4, 29, 42, 38, 29, 34, 36, 42, 49])
+    labels = ['gh', 'rat', 'squ', 'rab', 'ts', 'cat', 'fer', 'sm', 'sm2', 'om', ' mac', ' mac(V2)']
+    connectivity_length = np.array([543,783,783,543,1033,2149,2149,1225,3073,1182,6004,5372]) * 1000
+    v1_lambda = np.array([1,1,1,1,31,79,57,51,139,59,113,120]) * 1000
+    #np.array([1,1,1,1,40,100,72,65,76,144,153]) # np.array([2,2,2,2,81,179,147,79,245,128,175,212]) # np.array([4, 4, 4, 4, 29, 42, 38, 29, 44, 36, 40, 46])
+
 
     # Create figure and axis
     fig = plt.figure(figsize=(6,5.5))
@@ -93,15 +95,25 @@ def make_fig1_plots(data_sp, data_topo):
     ax.spines['right'].set_visible(False)
     plt.subplots_adjust(bottom=0.2, left=0.2)
     
-    plt.ylabel("norm. map scale      ", fontsize=fontsize, labelpad=9)
-    plt.xlabel('plastic pool size           ', fontsize=fontsize)
+    plt.ylabel("domain size     ", fontsize=fontsize, labelpad=9)
+    plt.xlabel('correlation pool size           ', fontsize=fontsize)
     plt.xticks(fontsize=fontsize*fs)
     plt.yticks(fontsize=fontsize*fs)
     ax.yaxis.get_offset_text().set_fontsize(fontsize) 
 
+    noise = torch.randn(4,)*1e4
+
     # Scatter plot
-    scatter = ax.scatter(torch.tensor(connectivity_length[:4]) + torch.randn(4,)*2e4, torch.tensor(v1_lambda[:4]**2) + torch.randn(4,)*0.5, s=200, linewidth=2, color='#DD8452', marker='s', alpha=0.9)
-    scatter = ax.scatter(connectivity_length[4:], v1_lambda[4:]**2, s=200, linewidth=2, color='#4C72B0', marker='o', alpha=0.9)
+    scatter = ax.scatter(
+        torch.tensor(connectivity_length[:4]) + noise, 
+        torch.tensor(v1_lambda[:4]), 
+        s=200, linewidth=2, color='#DD8452', marker='s', alpha=0.9
+    )
+    scatter = ax.scatter(
+        connectivity_length[4:], 
+        v1_lambda[4:], 
+        s=200, linewidth=2, color='#4C72B0', marker='o', alpha=0.9
+    )
 
     def linear_func(x, m, b):
         return m*x + b
@@ -110,11 +122,13 @@ def make_fig1_plots(data_sp, data_topo):
     x = np.array([1e6, 1e7])
     y = linear_func(x, popt[0], popt[1]) - 4
 
+    print(popt[0], popt[1])
+
     ax.set_xscale('log')
     ax.set_yscale('log')
 
-    plt.ylim(1.1e1, 5e3)
-    plt.xlim(1.1e5, 1e7)
+    plt.ylim(5e2, 5e5)
+    plt.xlim(4e5, 1e7)
 
     # Save the figure
     plt.savefig('./figures/fig1/connectivity.svg')
@@ -136,21 +150,28 @@ def make_fig1_plots(data_sp, data_topo):
     ax.yaxis.get_offset_text().set_fontsize(fontsize) 
 
     # Scatter plot
-    scatter = ax.scatter(torch.tensor(connectivity_length[:4]) + torch.randn(4,)*2e4, torch.tensor(v1_lambda[:4]**2) + torch.randn(4,)*0.5, s=200, linewidth=2, color='#DD8452', marker='s')
-    scatter = ax.scatter(connectivity_length[4:], v1_lambda[4:]**2, s=200, linewidth=2, color='#4C72B0', marker='o')
+    scatter = ax.scatter(
+        torch.tensor(connectivity_length[:4]) + noise, 
+        torch.tensor(v1_lambda[:4]), 
+        s=200, linewidth=2, color='#DD8452', marker='s'
+    )
+    scatter = ax.scatter(
+        connectivity_length[4:], 
+        v1_lambda[4:],
+        s=200, linewidth=2, color='#4C72B0', marker='o'
+    )
     
-    popt, pcov = curve_fit(linear_func, connectivity_length[4:], v1_lambda[4:]**2)
+    popt, pcov = curve_fit(linear_func, connectivity_length[4:], v1_lambda[4:])
     x = np.array([1e6, 1e7])
     y = linear_func(x, popt[0], popt[1]) #- 4
     ax.plot(x, y, linewidth=2, color='#4C72B0')
-    ax.plot([0, 1e6], [v1_lambda[0]**2, v1_lambda[0]**2], linewidth=2, color='#DD8452')
-    ax.plot([1e6, 1e6], [v1_lambda[0]**2, y.min()], linewidth=2, color='black', linestyle='--')
+    ax.plot([0, 1e6], [v1_lambda[0], v1_lambda[0]], linewidth=2, color='#DD8452')
 
     ax.set_xscale('log')
     ax.set_yscale('log')
 
-    plt.ylim(1.1e1, 5e3)
-    plt.xlim(1.1e5, 1e7)
+    plt.ylim(5e2, 5e5)
+    plt.xlim(4e5, 1e7)
 
     # Save the figure
     plt.savefig('./figures/fig1/fits.svg')
@@ -158,7 +179,7 @@ def make_fig1_plots(data_sp, data_topo):
 
     # ----------------------- animals lateral connectivity normalised
 
-    labels = ['gh', 'rat', 'squ', 'rab', 'ts', 'cat', 'fer', 'sm', 'sm(V2)', 'om', ' mac', ' mac(V2)']
+    labels = ['gh', 'rat', 'squ', 'rab', 'ts', 'cat', 'fer', 'sm', '', 'om', ' mac', ' mac(V2)']
     species_indices = torch.arange(len(v1_lambda))+1
 
     # Create figure and axis
@@ -180,7 +201,7 @@ def make_fig1_plots(data_sp, data_topo):
 
     ax.plot([1, 4.5], [v1_lambda[0]**2, v1_lambda[0]**2], color='#DD8452', linewidth=2)
 
-    popt, _ = curve_fit(linear_func, np.linspace(5, 12, 8), v1_lambda[4:]**2)
+    popt, _ = curve_fit(linear_func, np.linspace(5, 12, v1_lambda.shape[0]-4), v1_lambda[4:]**2)
     
     x = np.array([4.5, 13])
     y = linear_func(x, popt[0], popt[1])
@@ -550,9 +571,6 @@ def make_fig4_plots(data_sp, data_topo):
     
     costs = collect_wiring_pool(radii, trialvar, r_0=0)
 
-    s = 5
-    print(costs[:, s], trialvar[s])
-
     return
     
     map_sizes = costs.argmin(0) / trialvar.shape[0] * trialvar.max()
@@ -611,6 +629,9 @@ def plot_long_sparsification(connection_field, masks, jitter_strength=0.3, S=181
     #ori_map, _, _ = get_orientations(model.afferent_weights, gabor_size=model.rf_size)
     #ori_map = ori_map.view(connection_field.shape[-1], connection_field.shape[-1])
 
+    lr_comp = connection_field.clone()
+    cutoffs = lr_comp > 0
+    
     shape = lr_comp.shape[-1]
     x = np.arange(shape)
     y = x.repeat(shape).reshape(shape, shape)
