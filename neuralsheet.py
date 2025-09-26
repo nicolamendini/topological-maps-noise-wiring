@@ -86,7 +86,7 @@ class NeuralSheet(nn.Module):
         
         self.response_tracker = torch.zeros(self.iterations, 1, sheet_size, sheet_size, device=device)
 
-        self.mean_activations = torch.zeros(1, 1, sheet_size, sheet_size, device=device)
+        self.mean_activations = torch.zeros(1, 1, sheet_size, sheet_size, device=device) + self.homeo_target
         self.thresholds = torch.zeros(1, 1, sheet_size, sheet_size, device=device)
 
         self.var_activations = torch.zeros(1, 1, sheet_size, sheet_size, device=device)
@@ -131,6 +131,15 @@ class NeuralSheet(nn.Module):
 
         self.isdense = False
         self.needs_update = False
+
+        self.aff_code_match = torch.zeros(1, 1, sheet_size, sheet_size, device=device)
+        self.aff_code_deriv = torch.zeros(1, 1, sheet_size, sheet_size, device=device)
+        self.aff_code_deriv2 = torch.zeros(1, 1, sheet_size, sheet_size, device=device)
+        self.mri_synapses = torch.rand((sheet_size**2, 1, sheet_size, sheet_size), device=device)
+
+        self.exc_spread = torch.tensor([0.])
+
+        self.p_exc = torch.ones((sheet_size**2, 1, 1, 1), device=device)
 
     def forward(
         self, 
@@ -222,7 +231,7 @@ class NeuralSheet(nn.Module):
                 res_tiles = F.unfold(padded_response, self.window)[0].T
                 lateral = (res_tiles * crops.view(res_tiles.shape)).sum(1)
                                                 
-            lateral = lateral.view(self.current_response.shape) * (1 - self.aff_strength)
+            lateral = lateral.view(self.current_response.shape)
             net_afferent = (self.current_afferent - self.thresholds) * self.aff_strength
             
             update = net_afferent + lateral 
@@ -243,17 +252,19 @@ class NeuralSheet(nn.Module):
             if break_flag:
                 break_flag = False
                 break
+
                                       
         if adaptation:
             fast_lr = self.homeo_lr * 10
             res_pos = self.current_response[self.current_response>0]
             res_pow = res_pos**2
             if self.current_response.max():
-                
+
+                self.range_norm = 0.3
                 target = self.range_norm
-                self.mean_fr[self.current_response>0] = self.mean_fr[self.current_response>0]*(1-fast_lr) + res_pow*fast_lr
+                self.mean_fr[self.current_response>0] = self.mean_fr[self.current_response>0]*(1-fast_lr) + res_pos*fast_lr
                 gap = (self.mean_fr[self.current_response>0] - target) / target
-                self.gains[self.current_response>0] -= gap * fast_lr * 10
+                self.gains[self.current_response>0] -= gap * self.homeo_lr
                 
                 #gap = res_max - 0.65
                 #self.gains -= gap * fast_lr
@@ -268,39 +279,43 @@ class NeuralSheet(nn.Module):
             if aff_pos.shape[0]:
                 # can be seen as controlling the average rate of change, the higher the afferent, the slower the change
                 #diff = cosim(torch.relu(net_afferent), self.current_response)
-                target = 0.017
+                target = 0.05
                 #gap = (diff - target) / target
                 gap = (aff_pos.mean() - target) / target
-                self.aff_strength -= gap * self.homeo_lr * 1e-1
+                self.aff_strength -= gap * self.homeo_lr
                 #print(aff_pos.max(), aff_pos.mean())
                 #self.ap = aff_pos.clone()
+                #print(aff_pos.mean(), aff_pos.max())
                 
-            self.aff_strength = self.aff_strength.clip(0, 1)
+            self.aff_strength = self.aff_strength.clip(0, 2)
             
             if not performance_mode:
                 new_hist = np.histogram(res_pos.cpu(), bins=10, range=(0,1))[0]
                 self.avg_hist = self.avg_hist*(1-self.homeo_lr) + new_hist*self.homeo_lr
 
             self.mean_activations = self.mean_activations*(1-self.homeo_lr) + self.current_response*self.homeo_lr
-            thresh_update = self.homeo_target - self.mean_activations
-            self.thresholds -= (thresh_update/self.homeo_target) * self.homeo_lr * 1e-1
+            thresh_update = (self.homeo_target - self.mean_activations) / self.homeo_target
+            self.thresholds -= thresh_update * self.homeo_lr 
+
+            #print(thresh_update.mean(), self.homeo_target)
 
             if self.R_long:
-                self.std_target = 0.22
+                self.std_target = 0.25
                 target_cf = self.long_range_inh
-                masses = (np.pi * self.R_long**2).round()
+                masses = np.pi * self.R_long**2
                 self.spread = get_masses_and_spreads(target_cf, norm_flag=True, masses=masses)[1].view(-1,1,1,1)
-                gap = (self.std_target - self.spread.mean()) / self.std_target
+                gap = (self.std_target - self.spread[self.sheet_size**2//2 + self.sheet_size//2, 0, 0, 0]) / self.std_target
                 self.b += gap * self.homeo_lr 
-                self.b = self.b.clip(min=0, max=0.9)
+                self.b = self.b.clip(min=0, max=0.95)
 
                 #if gap.abs().mean() < 0.1:
 
-                #target_cf = self.long_range_exc
-                #exc_spread = get_masses_and_spreads(target_cf, norm_flag=True)[1].view(-1,1,1,1)
-                #gap = (exc_spread - 0.25) / 0.25
-                #self.p_exc = self.p_exc - gap * self.homeo_lr * 2
-                #self.p_exc = self.p_exc.clip(1/5, 5)
+                target_cf = self.long_range_exc
+                masses = self.R_long**2 * 0.8
+                self.exc_spread = get_masses_and_spreads(target_cf, norm_flag=True, masses=masses)[1].view(-1,1,1,1)
+                #gap = (self.std_target - self.exc_spread.mean()) / self.std_target
+                #self.b += gap * self.homeo_lr / 2
+                #self.b = self.b.clip(min=0, max=0.9)
 
             else:
                 target_cf = self.lateral_correlations * self.mid_cutoff
@@ -343,16 +358,18 @@ class NeuralSheet(nn.Module):
             lri = sampling_cf[:,:,self.window//2:-self.window//2+1,self.window//2:-self.window//2+1]
             lri = lri / (lri.sum([2,3], keepdim=True) + 1e-11)
 
-            #sampling_cf = sampling_cf * self.rolled_envelope
+            sampling_cf = sampling_cf * self.rolled_envelope
 
             #lre_masks = get_sparsity_masks(sampling_cf,self.long_cutoff, 1/3)
             #lre = sampling_cf * lre_masks
 
             lre_sorted = sampling_cf.view(sampling_cf.shape[0], -1).sort(dim=1, descending=True)[1]
             lre = self.lre_gauss * 0
-            lre[torch.arange(sampling_cf.shape[0], device=self.device)[:, None], lre_sorted] = self.lre_gauss          
+            lre[torch.arange(sampling_cf.shape[0], device=self.device)[:, None], lre_sorted] = self.lre_gauss
 
-            lre = lre.view(sampling_cf.shape) 
+            lre = lre.view(sampling_cf.shape)
+
+            #lre = sampling_cf ** 2
 
             asym = (lre * self.euclid).sum([2,3])
             

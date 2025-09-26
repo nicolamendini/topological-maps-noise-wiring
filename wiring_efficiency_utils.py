@@ -954,7 +954,7 @@ def pinwheel_detection(orientation_map, peak, window_size, bins, k=20):
     return - result_map
 
 
-def get_masses_and_spreads(cf, theta=0.99, norm_flag=False, masses=None):
+def get_masses_and_spreads(cf, theta=0.95, norm_flag=False, masses=None):
 
     cf = cf / cf.sum([2,3], keepdim=True)
 

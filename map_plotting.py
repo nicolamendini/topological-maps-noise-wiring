@@ -235,8 +235,12 @@ def show_map(model, network, random_sample=None):
     # thresholds
     #thresholds[0,0] = 0
     plt.subplot(4, 4, 3)
-    plt.imshow(model.short_range_exc[random_sample,0].cpu())
-    plt.title(titles[14])
+    plt.imshow(model.thresholds.view(M,M).cpu())
+    plt.title(titles[13])
+
+    plt.subplot(4, 4, 13)
+    plt.imshow(model.long_range_exc[random_sample,0].view(M,M).cpu())
+    plt.title(titles[-7])
 
 
     print('Net Afferent Max: {:.3f}, Net Afferent Min: {:.3f}'. format(net_afferent.max(), net_afferent.min()))
