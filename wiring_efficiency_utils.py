@@ -228,7 +228,7 @@ def get_orientations(weights, discreteness=101, gabor_size=25):
     return orientation_map, phase_map, mean_tc
     
 
-def get_grids(W, H, kernel_size, N, device='cuda'):
+def get_grids(W, H, kernel_size, N, jitter=0, device='cuda'):
 
     # Generate grid positions for each patch using broadcasting
     grid_positions_w = torch.linspace(0, W - kernel_size, N, device=device).view(-1, 1) / (W - 1) * 2 - 1
@@ -241,7 +241,12 @@ def get_grids(W, H, kernel_size, N, device='cuda'):
     # Stack and reshape to create grid
     grids_x, grids_y = torch.meshgrid(x.flatten(), y.flatten())
     grids = torch.stack((grids_x, grids_y), dim=-1)
+    
     grids = grids.view(N, kernel_size, kernel_size, N,  2).permute(3,0,2,1,4).reshape(N*N, kernel_size, kernel_size, 2)
+
+    grids += jitter
+
+    grids = grids.clip(-1,1)
 
     return grids
 
@@ -337,6 +342,29 @@ def get_gaussian(size, std, yscale=1, centre_x=0, centre_y=0):
     gaussian /= gaussian.sum()
         
     return gaussian 
+
+def get_euclid(size, yscale=1, centre_x=0, centre_y=0):
+    
+    distance = torch.arange(size) - size//2 - centre_x*(size//2)
+    x = distance.expand(1,1,size,size)**2
+    distance = torch.arange(size) - size//2 - centre_y*(size//2)
+    y = (distance.expand(1,1,size,size)**2).transpose(-1,-2)*yscale
+    t = (x + y)
+    euclid = torch.sqrt(t)
+        
+    return euclid 
+
+def get_cartesian(size):
+    
+    distance = torch.arange(size) - size//2 
+    x = distance.expand(1,1,size,size)
+    distance = torch.arange(size) - size//2 
+    y = (distance.expand(1,1,size,size)).transpose(-1,-2)
+
+    t = torch.cat([x,y], dim=1)
+        
+    return t 
+
 
 def get_spectral_entropy(codes):
     
@@ -565,7 +593,7 @@ def get_pca_dimensions(code_tracker, n_samps):
     comp_sampled = comp_sampled[::step_w, ::step_h][:n_samps, :n_samps]
     
     comp_sampled = comp_sampled.view(n_samps, n_samps, w, h)
-    comp_sampled = comp_sampled.permute(0,2,1,3).reshape(n_samps*w, n_samps*h)
+    #comp_sampled = comp_sampled.permute(0,2,1,3).reshape(n_samps*w, n_samps*h)
         
     return eff_dim, comp_sampled
 
@@ -1191,11 +1219,190 @@ def exact_log_fit(x_points, y_points):
     return a, b
 
 
+def histogram_mean_std(counts, hist_range):
+    """
+    Compute mean and std from histogram counts and range.
+
+    Args:
+        counts (torch.Tensor): 1D tensor of length n with bin counts.
+        hist_range (tuple): (min, max) range of the histogram.
+
+    Returns:
+        (mean, std): torch.Tensors
+    """
+    n_bins = counts.numel()
+    xmin, xmax = hist_range
+
+    # Bin centers
+    bin_edges = torch.linspace(xmin, xmax, n_bins + 1, device=counts.device, dtype=counts.dtype)
+    bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+
+    # Normalize counts
+    weights = counts / counts.sum()
+
+    # First and second moment
+    mean = (bin_centers * weights).sum()
+    mean_sq = (bin_centers**2 * weights).sum()
+
+    # Variance and std
+    var = mean_sq - mean**2
+    std = torch.sqrt(var)
+
+    return mean, std
 
 
+def reciprocal_connectivity(N, p):
+
+    N = N**2
     
+    # Sample only upper-triangle (excluding diagonal)
+    upper = (torch.rand(N, N) < p).triu(diagonal=1)
     
+    # Mirror to make symmetric
+    A = upper | upper.t()
+    
+    # Optional: zero diagonal (no autapses)
+    A.fill_diagonal_(1)
+    
+    return A.int()
 
 
-    
+def reciprocal_gaussian(sheet_size, k, std, device="cpu"):
+    """
+    sheet_size: N (lattice is N x N)
+    k: number of connections per neuron
+    std: Gaussian std
+    Returns: adjacency matrix (N^2 x N^2) float32, symmetric, no self-connections
+    """
+    N = sheet_size
+    L = N * N
+    pad = int(2*std)
+
+    # coordinates of real lattice neurons
+    coords = torch.stack(torch.meshgrid(
+        torch.arange(N, device=device),
+        torch.arange(N, device=device),
+        indexing="ij"
+    ), dim=-1).reshape(-1, 2)  # (L,2)
+
+    # adjacency
+    A = torch.zeros((L, L), dtype=torch.float32, device=device)
+
+    # padded lattice coordinates
+    x_pad = torch.arange(-pad, N+pad, device=device)
+    y_pad = torch.arange(-pad, N+pad, device=device)
+    padded_coords = torch.stack(torch.meshgrid(x_pad, y_pad, indexing='ij'), dim=-1).reshape(-1, 2)
+
+    for i in range(L):
+        c = coords[i]  # real neuron position
+
+        # compute distances to padded coordinates
+        diffs = padded_coords - c.unsqueeze(0)  # (N_pad^2, 2)
+        dist2 = (diffs[:,0]**2 + diffs[:,1]**2).float()
+        probs = torch.exp(-dist2 / (2*std**2))
+        probs /= probs.sum()
+
+        # sample k targets from padded lattice
+        idx = torch.multinomial(probs, num_samples=k, replacement=False)
+        sampled_coords = padded_coords[idx]
+
+        # map back to original lattice
+        mask = (sampled_coords[:,0] >= 0) & (sampled_coords[:,0] < N) & \
+               (sampled_coords[:,1] >= 0) & (sampled_coords[:,1] < N)
+        valid_coords = sampled_coords[mask]
+
+        # convert to linear indices
+        targets = (valid_coords[:,0].long() * N + valid_coords[:,1].long())
+        targets = targets[targets != i]  # remove self
+
+        # set reciprocal connections
+        A[i, targets] = 1.0
+        A[targets, i] = 1.0
+
+    return A
+
+
+
+def lattice_connectivity_exact_p(N, R, k_frac, device="cpu", seed=None):
+    """
+    N       : side length of 2D lattice (N x N)
+    R       : radius cutoff (Euclidean distance, inclusive)
+    k_frac  : fraction (0..1) of available neighbors (for each neuron) to assign
+              e.g. k_frac=0.2 => ~20% of a neuron's local neighbors
+    device  : torch device
+    seed    : optional int for reproducibility
+
+    Returns:
+      A : (L x L) symmetric float tensor with reciprocal connections.
+    """
+    if seed is not None:
+        torch.manual_seed(seed)
+        random.seed(seed)
+
+    L = N * N
+    coords = torch.stack(torch.meshgrid(
+        torch.arange(N, device=device),
+        torch.arange(N, device=device),
+        indexing="ij"
+    ), dim=-1).reshape(-1, 2)  # (L,2), int coords
+
+    # Compute distance mask (L x L) boolean : j is within R of i (excluding i)
+    diffs = coords.unsqueeze(1).float() - coords.unsqueeze(0).float()   # (L,L,2)
+    dist = torch.sqrt((diffs ** 2).sum(dim=-1))
+    allowed_mask = (dist <= float(R)) & (dist > 0.0)   # bool tensor
+
+    # For each neuron compute allowed targets list and allowed counts
+    allowed_lists = [allowed_mask[i].nonzero(as_tuple=False).squeeze(1).tolist() for i in range(L)]
+    allowed_counts = [len(lst) for lst in allowed_lists]
+
+    # Compute desired number per neuron (rounded)
+    desired_k = [int(round(k_frac * c)) for c in allowed_counts]
+    # ensure not more than available
+    desired_k = [min(desired_k[i], allowed_counts[i]) for i in range(L)]
+
+    # remaining slots that can accept reciprocal connections
+    remaining = desired_k[:]  # python list of ints
+
+    A = torch.zeros((L, L), dtype=torch.float32, device=device)
+
+    # process nodes in random order to avoid bias
+    order = list(range(L))
+    random.shuffle(order)
+
+    for i in order:
+        if remaining[i] <= 0:
+            continue
+
+        # candidate targets: within radius, not self, not already connected, and the target still has remaining slots
+        cand = []
+        for j in allowed_lists[i]:
+            if A[i, j] == 0 and remaining[j] > 0:
+                cand.append(j)
+
+        # if not enough candidates that also have remaining slots, allow candidates that have zero remaining
+        # but we will only create reciprocal edges if target still had room; otherwise skip them.
+        # To be strict about reciprocity we prefer targets with remaining>0 only.
+        if len(cand) == 0:
+            # nothing available that would maintain reciprocity for both sides
+            continue
+
+        # sample up to remaining[i] targets from cand without replacement
+        take = min(remaining[i], len(cand))
+        chosen = random.sample(cand, take)
+
+        for j in chosen:
+            # double-check (race-free in this single-threaded implementation)
+            if remaining[i] <= 0:
+                break
+            if remaining[j] <= 0:
+                continue
+
+            # make reciprocal connection and decrement both remaining counts
+            A[i, j] = 1.0
+            A[j, i] = 1.0
+            remaining[i] -= 1
+            remaining[j] -= 1
+
+    # note: some nodes might not reach desired_k because of limited mutual availability.
+    return A
 

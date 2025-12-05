@@ -118,25 +118,37 @@ def sample_and_plot(distribution, num_samples, sample_idx, ori_map=None, full=Fa
     plt.close()
 
 
-# Function to animate an array as a useful visualisation
-def animate(array, n_frames, cmap=None, interval=300):
-    
-    fig = plt.figure(figsize=(6,6))
-    global i
-    i = -2
-    plt.subplots_adjust(top=1, bottom=0, right=1, left=0, hspace=0, wspace=0)
-    im = plt.imshow(array[0], animated=True, cmap=cmap)
+def animate(array, n_frames=None, cmap="viridis", interval=300):
+    if n_frames is None:
+        n_frames = array.shape[0]
 
-    def updatefig(*args):
-        global i
-        if (i < n_frames - 1):  # ensure that we don't go out of bounds
-            i += 1
-        im.set_array(array[i])
-        return im,
+    # Convert torch.Tensor → numpy if needed
+    if hasattr(array, "detach"):
+        array = array.detach().cpu().numpy()
 
-    anim = animation.FuncAnimation(fig, updatefig, frames=n_frames, interval=interval, repeat=True)
-    plt.close(fig)  # Prevents the static plot from showing in the notebook
-    return HTML(anim.to_jshtml())  # Directly display the animation
+    vmin, vmax = array.min(), array.max()
+
+    # Create figure and axis
+    fig, ax = plt.subplots(figsize=(6,6))
+    ax.axis("off")
+    ax.set_position([0, 0, 1, 1])  # fill entire figure, no margins
+
+    # Transparent figure background (optional)
+    fig.patch.set_alpha(0.0)
+    ax.set_facecolor("black")  # optional: set to match your data background
+
+    im = ax.imshow(array[0], animated=True, cmap=cmap, vmin=vmin, vmax=vmax)
+
+    def update(frame):
+        im.set_array(array[frame])
+        return (im,)
+
+    anim = animation.FuncAnimation(
+        fig, update, frames=n_frames, interval=interval, blit=True, repeat=True
+    )
+
+    plt.close(fig)
+    return HTML(anim.to_jshtml())
 
 
 def show_map(model, network, random_sample=None):
@@ -189,7 +201,7 @@ def show_map(model, network, random_sample=None):
 
     # Model's current response
     plt.subplot(4, 4, 6)
-    plt.imshow(model.current_response[0, 0].detach().cpu())
+    plt.imshow(model.current_response[0, 0].detach().cpu(), cmap=cm.Greys)
     plt.title(titles[5])
 
     # Histogram of the current response
@@ -213,13 +225,13 @@ def show_map(model, network, random_sample=None):
     # Orientation histogram
     plt.subplot(4, 4, 10)
     hist_map = ori_map.flatten()
-    plt.hist(hist_map, bins=15)
+    plt.hist(hist_map, bins=10)
     plt.title(titles[8])
 
     # Retinotopic Bias
     plt.subplot(4, 4, 11)
     _,ring,_ = get_typical_dist_fourier(ori_map, 10)
-    plt.imshow(ring.cpu())
+    plt.imshow(ring.cpu(), cmap=cm.Greys)
     plt.title(titles[10])
 
     plt.subplot(4, 4, 8)
@@ -238,15 +250,23 @@ def show_map(model, network, random_sample=None):
     plt.imshow(model.thresholds.view(M,M).cpu())
     plt.title(titles[13])
 
+    exc = model.long_range_exc if model.long_range_exc.any() else model.short_range_exc
     plt.subplot(4, 4, 13)
-    plt.imshow(model.long_range_exc[random_sample,0].view(M,M).cpu())
+    plt.imshow(exc[random_sample,0].view(M,M).cpu())
     plt.title(titles[-7])
+
+    plt.subplot(4,4,15)
+    plt.plot(model.response_tracker[:model.iterations].sum([1,2,3]).cpu(), color='black')
+    plt.title('mean act')
+
+    plt.subplot(4,4,16)
+    plt.imshow(model.lateral_correlations_exc[random_sample,0].cpu()**0.5)
+    plt.title('exc_corr')
 
 
     print('Net Afferent Max: {:.3f}, Net Afferent Min: {:.3f}'. format(net_afferent.max(), net_afferent.min()))
     print('L4 Thresholds Max: {:.3f}, L4 Thresholds Min: {:.3f}'. format(model.thresholds.max(), model.thresholds.min()))
     print('Mean current response: {:.3f}'.format(model.current_response.mean()))
-    print('L4 Strength: {:.3f} aff strength: {:.3f}'.format(model.strength, model.aff_strength))
     loss = torch.mean((reco_input - img)**2)
     print('Reco loss: {:.3f}%'.format(loss))
 
