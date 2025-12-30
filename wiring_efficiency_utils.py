@@ -1406,3 +1406,60 @@ def lattice_connectivity_exact_p(N, R, k_frac, device="cpu", seed=None):
     # note: some nodes might not reach desired_k because of limited mutual availability.
     return A
 
+
+def gaussian_connection_tensor(N, r, p, device=None, dtype=torch.float32):
+    """
+    Returns tensor of shape (N^2, 1, N, N)
+
+    Args:
+        N (int): spatial size
+        r (float): cutoff radius (corresponds to 2*sigma)
+        p (float): fraction of possible connections sampled inside radius
+        device: torch device
+        dtype: tensor dtype
+    """
+    device = device or torch.device("cpu")
+    sigma = r / 2.0
+
+    # coordinate grid
+    xs = torch.arange(N, device=device)
+    ys = torch.arange(N, device=device)
+    grid_y, grid_x = torch.meshgrid(ys, xs, indexing="ij")
+
+    out = torch.zeros((N * N, 1, N, N), device=device, dtype=dtype)
+
+    for k in range(N * N):
+        cy = k // N
+        cx = k % N
+
+        dy = grid_y - cy
+        dx = grid_x - cx
+        dist2 = dx**2 + dy**2
+
+        # mask within cutoff radius
+        mask = dist2 <= r**2
+        if not mask.any():
+            continue
+
+        # Gaussian weights
+        weights = torch.exp(-dist2 / (2 * sigma**2)) * mask
+
+        # number of possible connections
+        num_candidates = mask.sum().item()
+        num_samples = max(1, int(p * num_candidates))
+
+        # flatten candidates
+        flat_weights = weights[mask]
+        probs = flat_weights / flat_weights.sum()
+
+        # sample indices
+        sampled = torch.multinomial(probs, num_samples, replacement=False)
+
+        # write ones
+        idxs = mask.nonzero(as_tuple=False)
+        selected_idxs = idxs[sampled]
+
+        out[k, 0, selected_idxs[:, 0], selected_idxs[:, 1]] = 1.0
+
+    return out
+

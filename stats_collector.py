@@ -32,13 +32,13 @@ def collect_stats(salt_and_pepper=True, accdim=False):
 
     dataloader = create_dataloader(root_dir, crop_size, batch_size, num_workers)
     
-    trials = 5
+    trials = 1
     n_conditions = 5
     epochs = 2
     n_samples = 3
     
-    trialvar = np.sqrt(np.linspace(5**2, 18**2, trials))
-    sizesvar = [40]
+    trialvar = np.sqrt(np.linspace(12**2, 2**2, trials))
+    sizesvar = no.round(trialvar * (40/12))
     N_CODES = sizesvar[-1]**2 + 100
     noise_conditions = torch.linspace(0, 0.5, n_conditions)
     plastic_sparsity_vals = torch.linspace(1, 20, n_conditions)
@@ -76,6 +76,7 @@ def collect_stats(salt_and_pepper=True, accdim=False):
                 b = 2
                 crop_size = a * (sizesvar[s] / trialvar[t] + b)
                 crop_size = round(crop_size)
+                cropsize = 26
                 
             dataloader = create_dataloader(root_dir, crop_size, batch_size, num_workers)
             print('cropsize: ', crop_size)
@@ -84,11 +85,11 @@ def collect_stats(salt_and_pepper=True, accdim=False):
                   + ' interaction radius: ' + str(float(trialvar[t])))
 
             if salt_and_pepper:
-                model = NeuralSheet(sizesvar[s], crop_size, R_rf, R_long=trialvar[t], device=device).to(device)
-                model.range_norm = 0.16
+                model = NeuralSheet(sizesvar[s], crop_size, R_rf, R_long=trialvar[s], device=device).to(device)
+                model.range_norm = 0.31
             else:
-                model = NeuralSheet(sizesvar[s], crop_size, R_rf, R_pat=trialvar[t], device=device).to(device)
-                model.range_norm = 0.12
+                model = NeuralSheet(sizesvar[s], crop_size, R_rf, R_pat=trialvar[s], R_long=trialvar[s], device=device).to(device)
+                model.range_norm = 0.3
                 
             lr = 1e-3
             network = init_nn(sizesvar[s], crop_size)
@@ -125,7 +126,7 @@ def collect_stats(salt_and_pepper=True, accdim=False):
                             lr *= beta
                             lr = lr if lr>limit else limit
         
-                            model.hebbian_lr = lr
+                            model.hebbian_lr = lr * 2e2
                             model.homeo_lr = lr
         
                             model(image, noise_lvl=0)
@@ -142,9 +143,9 @@ def collect_stats(salt_and_pepper=True, accdim=False):
                         batch_responses = torch.cat(batch_responses, dim=0)
                         batch_inputs = torch.cat(batch_inputs, dim=0)
         
-                        reco_input = network['activ'](network['model'](batch_responses))
+                        reco_input = network['activ'](network['model'](batch_responses))[:,:,R_rf:-R_rf,R_rf:-R_rf]
         
-                        targets = batch_inputs
+                        targets = batch_inputs[:,:,R_rf:-R_rf,R_rf:-R_rf]
                         loss, loss_std = nn_loss(network, targets, reco_input)
         
                         sim = cosim(targets.detach(), reco_input.detach())

@@ -55,7 +55,7 @@ class NeuralSheet(nn.Module):
         self.R_pat = R_pat
 
         self.R_ret = 8
-        R_ret_exc = self.R_ret #/ np.sqrt(2)
+        R_ret_exc = self.R_ret# / 3 #np.sqrt(2)
 
         self.init_indices()
         
@@ -83,17 +83,13 @@ class NeuralSheet(nn.Module):
 
         self.eye = torch.eye(sheet_size**2).view(sheet_size**2, 1, sheet_size, sheet_size).to(device)
 
-        self.rand = 1 + torch.randn(self.eye.shape, device=self.device) * 0.2
-        self.rand = torch.relu(self.rand)
-        #self.rand *= self.ret_cutoff_exc
-        #self.rand /= self.rand.sum([2,3], keepdim=True)
-
         self.ret_cutoff = generate_circles(sheet_size, sheet_size, self.R_ret).to(device) 
         self.ret_cutoff_exc = generate_circles(sheet_size, sheet_size, R_ret_exc).to(device)
 
-        self.sp_rand = lattice_connectivity_exact_p(self.sheet_size, R_ret_exc, 0.5).to(device).view(self.eye.shape)
-        #self.sp_rand = reciprocal_connectivity(self.sheet_size, 0.05).to(device).view(self.eye.shape)
-        #self.sp_rand = reciprocal_gaussian(sheet_size, round(0.5*np.pi*R_long**2), R_long).to(device).view(self.eye.shape)
+        self.sp_rand = gaussian_connection_tensor(self.sheet_size, R_long, 0.12).to(device)
+        #self.sp_rand = lattice_connectivity_exact_p(self.sheet_size, R_ret_exc, 0.12).to(device).view(self.eye.shape)
+        #self.sp_rand = reciprocal_connectivity(self.sheet_size, 0.12).to(device).view(self.eye.shape)
+        self.sp_rand = reciprocal_gaussian(sheet_size, round(0.12*np.pi*R_long**2), R_long/2).to(device).view(self.eye.shape)
         #self.sp_rand = torch.rand(self.sheet_size**2, self.sheet_size**2).to(device) < 0.12
         #self.sp_rand = lattice_connectivity_exact_p(self.sheet_size, self.R_ret, 0.5).to(device)
         #probs = generate_gaussians(self.sheet_size, self.sheet_size, self.R_ret / 5, offset=self.R_ret).view(self.sheet_size**2,-1)
@@ -105,9 +101,11 @@ class NeuralSheet(nn.Module):
         #mask = mask[:,self.R_ret:-self.R_ret,self.R_ret:-self.R_ret]
         #self.sp_rand = mask.to(device)
         self.sp_rand = self.sp_rand.view(self.eye.shape) * (1-self.eye) + self.eye
-        self.sp_rand = self.sp_rand * self.ret_cutoff_exc
+        #self.sp_rand = self.sp_rand * self.ret_cutoff_exc
         self.sp_rand = self.sp_rand > 0
         self.sp_rand = self.sp_rand.float()
+
+        self.sp_rand = 1
 
         #self.sp_rand2 = lattice_connectivity_exact_p(self.sheet_size, R_ret_exc, 0.5).to(device).view(self.eye.shape)
         #self.sp_rand2 = self.sp_rand2.view(self.eye.shape) * (1-self.eye) + self.eye
@@ -115,20 +113,24 @@ class NeuralSheet(nn.Module):
         #ns = round(p * self.R_ret**2 * np.pi)
         #self.sp_rand = reciprocal_gaussian(self.sheet_size, ns, self.R_ret/2).float().to(device).view(self.eye.shape)
         
-        #self.mri_mask = 1 - self.lateral_weights_exc / self.lateral_weights_exc.view(sheet_size**2, -1).max(1)[0].view(-1,1,1,1)
+        
         #self.mri_mask = 1
 
-        self.mid_cutoff = generate_circles(sheet_size, sheet_size, R_pat).to(device) 
+        self.mid_cutoff = generate_circles(sheet_size, sheet_size, R_long).to(device) 
         #self.mid_cutoff = generate_gaussians(sheet_size, sheet_size, 2).to(device) 
-        self.long_cutoff = generate_circles(sheet_size, sheet_size, R_long).to(device) 
-        self.decor_cutoff = generate_circles(sheet_size, sheet_size, 5).to(device)
-        self.decor_gauss = generate_gaussians(sheet_size, sheet_size, 5/5).to(device)
+        self.long_cutoff = generate_circles(sheet_size, sheet_size, R_long/2).to(device) 
+        self.decor_cutoff = generate_circles(sheet_size, sheet_size, R_long/4).to(device)
+        self.decor_gauss = generate_circles(sheet_size, sheet_size, R_long/4/4).to(device)
         #self.decor_cutoff += self.decor_cutoff + torch.rand(self.decor_cutoff.shape, device=self.device) 
         #self.decor_cutoff /= self.decor_cutoff.sum([2,3], keepdim=True)
-        #self.short_cutoff = generate_circles(sheet_size, sheet_size, std_exc*cutoff/2).to(device)
+        self.short_cutoff = generate_circles(sheet_size, sheet_size, R_long/3).to(device)
         self.euclid_cutoff = generate_circles(sheet_size, sheet_size, R_long, offset=self.window//2).to(device)
         #self.long_cutoff *= 1 - generate_circles(sheet_size, sheet_size, R_pat, offset=self.window//2).to(device) 
 
+        self.mri_mask = 1 - self.decor_gauss / self.decor_gauss.view(sheet_size**2, -1).max(1)[0].view(-1,1,1,1)
+
+        #self.sp_rand = torch.rand(self.eye.shape, device=self.device) < 0.2
+        
         #self.ii_cutoff = generate_circles(sheet_size, sheet_size, R_long/2).to(device)
         
         lateral_correlations = torch.rand((sheet_size**2, 1, sheet_size, sheet_size), device=device)
@@ -325,9 +327,26 @@ class NeuralSheet(nn.Module):
                 lre_padded = F.pad(self.long_range_exc, (pad_amount, pad_amount, pad_amount, pad_amount))
                 self.slicing_var[:, 2:3] = lre_padded
 
-                #self.r = self.current_afferent.mean() * 0.00
-                #lri = torch.relu(self.lateral_correlations - self.r) + 1e-11
-                #lri = lri * self.long_cutoff_inh
+                #inv = 0.00
+                #self.r = self.current_afferent.mean() * inv
+                #self.r = - 10 / self.R_long**2 / np.pi
+                #print(self.r)
+                #lri = torch.relu(self.long_range_inh - self.r) + 1e-11
+
+                #flat = self.long_cutoff / self.long_cutoff.sum([2,3],keepdim=True)
+
+                #beta = self.current_afferent.mean() - 0.27
+                #beta = (beta > 0).float()
+                #beta = torch.sigmoid(beta * 100)
+                #print(beta)
+                #peak = torch.relu(self.long_range_inh - 0.5/self.R_long**2/np.pi) + 1e-11
+                #peak = peak / peak.sum([2,3],keepdim=True)
+                #print(beta)
+                #lri = flat * (1-beta) + peak * beta
+
+                #lri = torch.relu(self.lateral_correlations - 0.00)
+                
+                #lri = lri * self.long_cutoff
                 #lri = lri / lri.sum([2,3], keepdim=True)
                 lri_padded = F.pad(self.long_range_inh, (pad_amount, pad_amount, pad_amount, pad_amount))
                 self.slicing_var[:, 3:4] = lri_padded
@@ -461,14 +480,19 @@ class NeuralSheet(nn.Module):
 
             #inv_t = 10
             #short_f = max(1, 2.5*(1 - i / inv_t))
-            short_pot = (lateral_sre - lateral_mri) * 1  #self.b.mean() #* short_f
+            c = 1.15
+            b = 0.33
+            
+            short_pot = (lateral_sre*1 - 1*lateral_mri) * 1 #self.b.mean() #* short_f
 
             #long_f = min(1, i / inv_t)
-            long_pot = (lateral_lre - lateral_lri) * 1 #* self.gains.mean()
+            long_pot = (lateral_lre*0 - 0.*lateral_lri) * 1 #* self.gains #* self.gains.mean()
 
             #print(short_f, long_f)
+
+            tot_pot = short_pot + long_pot
             
-            update = net_afferent + (short_pot + long_pot) * self.gains
+            update = net_afferent + tot_pot * self.gains
                         
             self.current_response = torch.tanh(torch.relu(update + self.noise*noise_lvl)) 
 
@@ -503,14 +527,14 @@ class NeuralSheet(nn.Module):
         beta = self.homeo_lr * 1e2 * self.current_response / 2
         #self.aff_mag = (((self.afferent_weights - self.thresholds.view(-1,1,1,1)) * self.aff_strength.view(-1,1,1,1))**2).sum([2,3], keepdim=True) 
         #self.aff_mag = (self.afferent_weights**2).sum([2,3]) * self.rf_size**2 * np.pi / 4
-        self.lri_mag = (1-beta) * self.lri_mag + beta * long_pot
-        self.delta_mag = (1-beta) * self.delta_mag + beta * lateral_lre #* self.b.view(self.delta_mag.shape)
+        self.lri_mag = (1-beta) * self.lri_mag + beta * tot_pot
+        self.delta_mag = (1-beta) * self.delta_mag + beta * short_pot #* self.b.view(self.delta_mag.shape)
 
         
         if adaptation:
 
             beta_fr = self.homeo_lr * 1e2 * self.current_response / 2
-            self.range_norm = 0.3
+            #self.range_norm = 0.31
             target = self.range_norm
             self.mean_fr = self.mean_fr * (1 - beta_fr) + beta_fr * self.current_response
             gap = (self.mean_fr - target) / target
@@ -700,8 +724,8 @@ class NeuralSheet(nn.Module):
         #inv_mask = 1 - self.blending_gauss
         #add_rand = self.blending_gauss * self.rand
         #print(inv_mask.shape, self.trace.shape)
-        contributions = self.trace
-        self.step(self.lateral_correlations_exc, contributions, contributions.view(-1,1,1,1) - self.homeo_target)
+        contributions = self.current_response #self.response_tracker[0:1]
+        self.step(self.lateral_correlations_exc, contributions, contributions.view(-1,1,1,1) - 0*self.homeo_target, unlearning=0)
 
         #a = contributions + add_rand
         #plt.imshow(a[130,0].cpu())
@@ -712,6 +736,10 @@ class NeuralSheet(nn.Module):
         #self.step(self.lateral_correlations_exc, contributions, -contributions.view(-1,1,1,1)*0.25 - 0.0)
 
         contributions = self.current_response - self.lat_unlearning 
+        #contributions_d = F.interpolate(contributions, scale_factor=0.5, mode='bilinear', align_corners=False)
+        #contributions_d = F.interpolate(contributions_d, scale_factor=2.0, mode='bilinear', align_corners=False)
+        #g = torch.exp(-((r:=torch.arange(-3,4,device=self.device))[:,None]**2 + r[None,:]**2)/2)
+        #contributions_d = torch.nn.functional.conv2d(contributions, g[None,None] / g.sum(), padding=3)
         self.step(self.lateral_correlations, contributions, contributions.view(-1,1,1,1))
 
         contributions = self.current_response
@@ -730,13 +758,12 @@ class NeuralSheet(nn.Module):
         #    weights += self.blending_gauss * fixed_alpha * self.homeo_target
             
         weights *= weights > 0 # clear weak weights
-        weights += 1e-11
-        weights /= weights.sum([2,3], keepdim=True) # normalise remaining weights
+        weights /= weights.mean([2,3], keepdim=True) + 1e-11 # normalise remaining weights
         
     def get_aff_weights(self):
 
         #retinotopy = self.aff_crop()
-        aff_weights = self.afferent_weights * self.aff_cutoff * self.aff_mask * self.retinotopic_bias
+        aff_weights = self.afferent_weights * self.aff_cutoff #* self.aff_mask * self.retinotopic_bias
         #aff_weights = self.afferent_weights * self.aff_cutoff
         aff_weights /= aff_weights.sum([2,3], keepdim=True) + 1e-11
         
@@ -754,20 +781,23 @@ class NeuralSheet(nn.Module):
 
         #deco_strength = 0.4
 
-        sre = self.lateral_weights_exc
+        inh_corr = self.lateral_correlations
+
+        sre = self.short_cutoff * self.lateral_correlations #self.sp_rand * self.ret_cutoff_exc * self.lateral_correlations_exc
         sre = sre / sre.sum([2,3], keepdim=True)
         
-        mri = self.lateral_correlations * self.ret_cutoff
+        mri = inh_corr * self.mid_cutoff
         mri /= mri.sum([2,3], keepdim=True) + 1e-11
+        mri *= 0
 
-        local_ret = self.decor_gauss
+        local_ret = self.decor_gauss * self.lateral_correlations
         local_ret /= local_ret.sum([2,3], keepdim=True)
 
-        local_inh = self.decor_cutoff * self.lateral_correlations
+        local_inh = self.lateral_correlations * self.decor_cutoff #* (1-self.eye)
         local_inh /= local_inh.sum([2,3], keepdim=True)
 
-        deco_strength = 0
-        ret = 1
+        deco_strength = 1
+        ret = 0.
 
         sre = sre * ret + local_ret * deco_strength #self.b.mean()
         mri = mri * ret + local_inh * deco_strength #* (0.25 + self.b.mean())
@@ -799,7 +829,7 @@ class NeuralSheet(nn.Module):
 
         if self.R_long:
 
-            lri = (self.lateral_correlations + 1e-11) * self.long_cutoff  #* (1-self.decor_cutoff)
+            lri = self.long_cutoff #* self.lateral_correlations_ei #* (1-self.decor_cutoff)
             lri = lri / lri.sum([2,3], keepdim=True)
 
             #lre_masks = get_sparsity_masks(sampling_cf,self.long_cutoff, 1/3)
@@ -810,10 +840,19 @@ class NeuralSheet(nn.Module):
             #lre[torch.arange(sampling_cf.shape[0], device=self.device)[:, None], lre_sorted] = self.lre_gauss
 
             #lre = (self.lateral_correlations_exc + self.lateral_weights_exc*1e-11) * self.long_cutoff
-            lre =  self.long_cutoff * self.lateral_correlations_exc #* (1-self.decor_cutoff)
+            #rand = torch.rand(self.long_cutoff.shape, device=self.device) < 0.2
+            #self.mask = get_sparsity_masks(self.lateral_correlations_exc, self.long_cutoff, 0.2)
+            lre = self.long_cutoff * self.sp_rand * self.lateral_correlations_exc + 1e-11 #* self.rand #* self.envelope #* rand + 1e-11
             #lre = self.envelope[:,:, self.env_pad:-self.env_pad, self.env_pad:-self.env_pad]  * self.long_cutoff
             #lre = lre * self.rolled_envelope[:,:, self.env_pad:-self.env_pad, self.env_pad:-self.env_pad] 
             lre = lre / lre.sum([2,3], keepdim=True)
+
+            if self.R_pat == 2:
+
+                sre = 0.4 * local_ret + 0.8 * lre
+                mri = local_inh
+
+            else
 
             #lre = self.lateral_weights_exc * 4 + lre
 

@@ -260,7 +260,7 @@ def show_map(model, network, random_sample=None):
     plt.title('mean act')
 
     plt.subplot(4,4,16)
-    plt.imshow(model.lateral_correlations_exc[random_sample,0].cpu()**0.5)
+    plt.imshow(model.lateral_correlations_exc[random_sample,0].cpu())
     plt.title('exc_corr')
 
 
@@ -277,7 +277,7 @@ def show_map(model, network, random_sample=None):
 def plot_absolute_phases(model,target_channel=0):
 
     # exctracting useful params
-    rfs = model.afferent_weights.clone().cpu()
+    rfs = model.get_aff_weights().clone().cpu()
     aff_units = rfs.shape[-1]
     sheet_units = model.sheet_size
     channels = 1
