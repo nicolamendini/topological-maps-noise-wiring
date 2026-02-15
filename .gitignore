@@ -22,3 +22,5 @@ input_stimuli_triangle/
 brain_observatory_cache/
 path/
 imagenet-mini/
+
+neuro.pt
