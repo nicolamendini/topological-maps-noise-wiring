@@ -18,6 +18,8 @@ import umap
 import matplotlib.cm as cm
 import math
 import nn_template 
+from typing import Tuple, Optional, Dict
+
 
 class RandomCropDataset(Dataset):
     def __init__(self, directory, crop_size):
@@ -244,7 +246,10 @@ def get_grids(W, H, kernel_size, N, jitter=0, device='cuda'):
     
     grids = grids.view(N, kernel_size, kernel_size, N,  2).permute(3,0,2,1,4).reshape(N*N, kernel_size, kernel_size, 2)
 
-    grids += jitter
+    if jitter:
+        
+        grids += torch.randn((N*N,1,1,2), device=device) * jitter
+
 
     grids = grids.clip(-1,1)
 
@@ -262,15 +267,17 @@ def extract_patches(input_image, grids):
     
     return patches
 
-def init_nn(input_size, output_size, device='cuda'):
+def init_nn(input_size, output_size, out_channels=2, device='cuda'):
 
     network = {}
     
     network['structure'] = [
         ('flatten', 1, input_size**2),
-        ('dense', output_size**2, input_size**2),
+        ('dense', out_channels*output_size**2, input_size**2),
         ('relu', ),
-        ('unflatten', 1, output_size)
+        ('dense', out_channels*output_size**2, out_channels*output_size**2),
+        ('relu', ),
+        ('unflatten', out_channels, output_size)
     ]
     
     network['model'] = nn_template.Network(network['structure'], device=device)
@@ -308,7 +315,7 @@ def nn_loss(network, true_input, reco_input):
 
     l1 = sum([list(network['model'].layers[l].parameters())[0].abs().sum() if list(network['model'].layers[l].parameters()) else 0 for l in range(len(network['structure']))])
 
-    loss = mse.mean() + l1 * 1e-7
+    loss = mse.mean() + l1 * 1e-5
     loss_std = mse.std()
     
     return loss, loss_std
@@ -403,51 +410,44 @@ def count_significant_freqs(codes):
     return counts.float().sum(1).mean()
 
 
-# Function to measure the typical distance between iso oriented map domains
-# Samples a certain number of orientations given by 'precision' and returns 
-# the histograms of the gaussian doughnuts that were used to fit the curve together with the peak
-def get_typical_dist_fourier(orientations, border_cut, precision=10, mask=1, match_std=1):
-    
-    # R is the size of the map after removing some padding size, must be odd thus 1 is subtractedS
-    grid_size = orientations.shape[-1] - 1
-    R = (grid_size - border_cut*2)
+def get_typical_dist_fourier(orientations,
+                              mask=1,
+                              match_std=1):
+    """
+    Estimate typical domain spacing from an orientation map using
+    the complex order parameter z = exp(i*2*theta).
 
-    spectrum = 0
-    avg_spectrum = torch.zeros(R,R)
-    avg_peak = 0
-    avg_hist = torch.zeros(R//2)
-    ang_range = torch.linspace(0, torch.pi-torch.pi/precision, precision)
+    Returns:
+        avg_peak     : estimated wavelength (domain spacing, in pixels)
+        avg_spectrum : averaged 2D Fourier amplitude spectrum
+        avg_hist     : radial histogram used to detect the ring
+    """
 
-    # average over a number of rings, given by precision
-    for i in range(precision):
-        
-        # compute the cosine similarity and subtract that of the opposite angle
-        # this is needed to get a cleaner ring
-        output = torch.cos(orientations - ang_range[i])**2
-        output -= torch.cos(orientations - ang_range[i] + torch.pi/2)**2
-        spectrum = output[border_cut:-(border_cut+1),border_cut:-(border_cut+1)].cpu()
-            
-        #plt.imshow(spectrum)
-        #plt.show()
-            
-        # compute the fft and mask it to remove the central bias
-        af = torch.fft.fft2(spectrum)
-        af = torch.abs(torch.fft.fftshift(af))
-        af *= 1 - get_circle(af.shape[-1], mask)[0,0]
-        
-        hist, peak_interpolate = match_ring(af, match_std)
-            
-        # add the results to the average trackers
-        # 1/peak_interpolate is to convert from freq to wavelength
-        avg_peak += 1/peak_interpolate
-        avg_spectrum += af
-        avg_hist += hist
-        
-    avg_peak /= precision
-    avg_spectrum /= precision
-    avg_hist /= precision
-    
-    return avg_peak, avg_spectrum, avg_hist
+
+    # Complex orientation order parameter
+    z = torch.exp(2j * orientations)
+
+    # Use real part (imag works equally well)
+    spectrum_field = torch.real(z)
+
+    # Remove DC component
+    spectrum_field = spectrum_field - spectrum_field.mean()
+
+    # Fourier transform
+    af = torch.fft.fft2(spectrum_field)
+    af = torch.abs(torch.fft.fftshift(af))
+
+    # Remove central low-frequency bias
+    af *= (1 - get_circle(af.shape[-1], mask)[0, 0].to(af.device))
+
+    # Detect ring in Fourier domain
+    hist, peak_interpolate = match_ring(af, match_std)
+
+    # Convert frequency to wavelength
+    avg_peak = 1.0 / peak_interpolate
+
+    return avg_peak, af, hist
+
 
 # function to find the peak of a fourier transform
 def match_ring(af, match_std=1):
@@ -572,7 +572,7 @@ def cosim(X, Y, weighted=False):
     
     return cos    
 
-def get_pca_dimensions(code_tracker, n_samps):
+def get_pca_dimensions(code_tracker, n_samps=1):
 
     mask = torch.isnan(code_tracker).any(dim=(-2, -1))
     # Keep only the images where no NaN exists in the last two dimensions
@@ -587,7 +587,8 @@ def get_pca_dimensions(code_tracker, n_samps):
     pca.fit(code_tracker.cpu().view(-1,w*h))
     eff_dim = (pca.explained_variance_ratio_.cumsum() < 0.95).sum()
     
-    comp_sampled = torch.tensor(pca.components_).view(w,h,w*h)
+    comp_sampled_all = torch.tensor(pca.components_)
+    comp_sampled = comp_sampled_all.view(w,h,w*h)
     step_w = w // n_samps
     step_h = h // n_samps
     comp_sampled = comp_sampled[::step_w, ::step_h][:n_samps, :n_samps]
@@ -595,7 +596,7 @@ def get_pca_dimensions(code_tracker, n_samps):
     comp_sampled = comp_sampled.view(n_samps, n_samps, w, h)
     #comp_sampled = comp_sampled.permute(0,2,1,3).reshape(n_samps*w, n_samps*h)
         
-    return eff_dim, comp_sampled
+    return eff_dim, comp_sampled_all
 
 def get_umap(code_tracker, window_size):
     
@@ -1267,199 +1268,187 @@ def reciprocal_connectivity(N, p):
     return A.int()
 
 
-def reciprocal_gaussian(sheet_size, k, std, device="cpu"):
+
+def generate_sinusoidal_grating(size, wavelength, angle_deg, phase):
     """
-    sheet_size: N (lattice is N x N)
-    k: number of connections per neuron
-    std: Gaussian std
-    Returns: adjacency matrix (N^2 x N^2) float32, symmetric, no self-connections
+    size: int, output image is size x size
+    wavelength: float, in pixels
+    angle_deg: float, orientation in degrees
+    Returns: 2D tensor [1, size, size] (single-channel)
     """
-    N = sheet_size
-    L = N * N
-    pad = int(2*std)
-
-    # coordinates of real lattice neurons
-    coords = torch.stack(torch.meshgrid(
-        torch.arange(N, device=device),
-        torch.arange(N, device=device),
-        indexing="ij"
-    ), dim=-1).reshape(-1, 2)  # (L,2)
-
-    # adjacency
-    A = torch.zeros((L, L), dtype=torch.float32, device=device)
-
-    # padded lattice coordinates
-    x_pad = torch.arange(-pad, N+pad, device=device)
-    y_pad = torch.arange(-pad, N+pad, device=device)
-    padded_coords = torch.stack(torch.meshgrid(x_pad, y_pad, indexing='ij'), dim=-1).reshape(-1, 2)
-
-    for i in range(L):
-        c = coords[i]  # real neuron position
-
-        # compute distances to padded coordinates
-        diffs = padded_coords - c.unsqueeze(0)  # (N_pad^2, 2)
-        dist2 = (diffs[:,0]**2 + diffs[:,1]**2).float()
-        probs = torch.exp(-dist2 / (2*std**2))
-        probs /= probs.sum()
-
-        # sample k targets from padded lattice
-        idx = torch.multinomial(probs, num_samples=k, replacement=False)
-        sampled_coords = padded_coords[idx]
-
-        # map back to original lattice
-        mask = (sampled_coords[:,0] >= 0) & (sampled_coords[:,0] < N) & \
-               (sampled_coords[:,1] >= 0) & (sampled_coords[:,1] < N)
-        valid_coords = sampled_coords[mask]
-
-        # convert to linear indices
-        targets = (valid_coords[:,0].long() * N + valid_coords[:,1].long())
-        targets = targets[targets != i]  # remove self
-
-        # set reciprocal connections
-        A[i, targets] = 1.0
-        A[targets, i] = 1.0
-
-    return A
+    x = np.arange(size) - size/2
+    y = np.arange(size) - size/2
+    X, Y = np.meshgrid(x, y)
+    
+    # Convert angle to radians
+    theta = np.deg2rad(angle_deg)
+    phase = np.deg2rad(phase)
+    
+    # Rotate coordinates
+    X_rot = X * np.cos(theta) + Y * np.sin(theta)
+    
+    # Sinusoidal grating
+    grating = np.sin(2 * np.pi * X_rot / wavelength + phase)
+    
+    # Normalize to [0,1]
+    grating = (grating - grating.min()) / (grating.max() - grating.min())
+    
+    return torch.tensor(grating, dtype=torch.float32).unsqueeze(0) * 0.8  # shape [1, size, size]
 
 
 
-def lattice_connectivity_exact_p(N, R, k_frac, device="cpu", seed=None):
+
+def radial_mean_angle_distance(theta):
     """
-    N       : side length of 2D lattice (N x N)
-    R       : radius cutoff (Euclidean distance, inclusive)
-    k_frac  : fraction (0..1) of available neighbors (for each neuron) to assign
-              e.g. k_frac=0.2 => ~20% of a neuron's local neighbors
-    device  : torch device
-    seed    : optional int for reproducibility
+    Parameters
+    ----------
+    theta : ndarray, shape (N, N)
+        Orientation map with values in [0, pi)
 
+    Returns
+    -------
+    mean_dist_deg : ndarray, shape (N//2,)
+        Mean orientation angle distance (degrees) vs radial distance
+    """
+
+    N = theta.shape[0]
+    max_r = N // 2
+
+    dist_sum = np.zeros(max_r)
+    dist_count = np.zeros(max_r)
+
+    for dx in range(-(max_r - 1), max_r):
+        for dy in range(-(max_r - 1), max_r):
+            if dx == 0 and dy == 0:
+                continue
+
+            r = int(round(np.sqrt(dx*dx + dy*dy)))
+            if r <= 0 or r >= max_r:
+                continue
+
+            x0_min = max(0, -dx)
+            x0_max = min(N, N - dx)
+            y0_min = max(0, -dy)
+            y0_max = min(N, N - dy)
+
+            if x0_min >= x0_max or y0_min >= y0_max:
+                continue
+
+            a = theta[x0_min:x0_max, y0_min:y0_max]
+            b = theta[x0_min+dx:x0_max+dx, y0_min+dy:y0_max+dy]
+
+            # orientation distance modulo pi
+            d = np.abs(a - b)
+            d = np.minimum(d, np.pi - d)
+
+            dist_sum[r] += d.sum()
+            dist_count[r] += d.size
+
+    mean_dist = np.zeros(max_r)
+    valid = dist_count > 0
+    mean_dist[valid] = dist_sum[valid] / dist_count[valid]
+
+    # r = 0: self-distance is exactly zero
+    #mean_dist[0] = mean_dist[1]
+
+    # convert to degrees
+    mean_dist_deg = mean_dist * (180.0 / np.pi)
+
+    return mean_dist_deg
+
+def gaussian_local_permutation(tensor: torch.Tensor, std: float, seed=None, distance_metric='euclidean'):
+    """
+    Applies a soft local random permutation via Gaussian-sampled swaps, tracks the permutation,
+    and computes the average displacement distance of elements from original positions.
+    
+    For each position (i,j) in random order:
+    - Sample displacement di ~ Normal(0, std), dj ~ Normal(0, std)
+    - Target ti = clamp(round(i + di), 0, N-1), tj = clamp(round(j + dj), 0, N-1)
+    - Swap with target (if different)
+    
+    This creates a probabilistic local shuffle where closer positions are more likely to be swapped,
+    approximating a 2D Gaussian diffusion on the grid.
+    
+    Parameters:
+        tensor: torch.Tensor of shape (N, N)
+        std: float - standard deviation for the 2D Gaussian (in grid units); std=0: no shuffle, std~1: very local, std>>1: more global
+        seed: optional int for reproducibility
+        distance_metric: 'euclidean' (default) or 'manhattan'
+    
     Returns:
-      A : (L x L) symmetric float tensor with reciprocal connections.
+        permuted_tensor: (N, N) - shuffled tensor
+        perm_indices: (N*N,) long tensor - permuted.flatten()[k] == original.flatten()[perm_indices[k]]
+        mean_displacement: float - average distance each element moved in grid units
     """
     if seed is not None:
         torch.manual_seed(seed)
         random.seed(seed)
-
-    L = N * N
-    coords = torch.stack(torch.meshgrid(
-        torch.arange(N, device=device),
-        torch.arange(N, device=device),
-        indexing="ij"
-    ), dim=-1).reshape(-1, 2)  # (L,2), int coords
-
-    # Compute distance mask (L x L) boolean : j is within R of i (excluding i)
-    diffs = coords.unsqueeze(1).float() - coords.unsqueeze(0).float()   # (L,L,2)
-    dist = torch.sqrt((diffs ** 2).sum(dim=-1))
-    allowed_mask = (dist <= float(R)) & (dist > 0.0)   # bool tensor
-
-    # For each neuron compute allowed targets list and allowed counts
-    allowed_lists = [allowed_mask[i].nonzero(as_tuple=False).squeeze(1).tolist() for i in range(L)]
-    allowed_counts = [len(lst) for lst in allowed_lists]
-
-    # Compute desired number per neuron (rounded)
-    desired_k = [int(round(k_frac * c)) for c in allowed_counts]
-    # ensure not more than available
-    desired_k = [min(desired_k[i], allowed_counts[i]) for i in range(L)]
-
-    # remaining slots that can accept reciprocal connections
-    remaining = desired_k[:]  # python list of ints
-
-    A = torch.zeros((L, L), dtype=torch.float32, device=device)
-
-    # process nodes in random order to avoid bias
-    order = list(range(L))
-    random.shuffle(order)
-
-    for i in order:
-        if remaining[i] <= 0:
+    
+    if len(tensor.shape) != 2 or tensor.shape[0] != tensor.shape[1]:
+        raise ValueError("Input tensor must be square (N x N)")
+    
+    N = tensor.shape[0]
+    device = tensor.device
+    
+    # Data: values being permuted
+    data = tensor.flatten().clone()
+    
+    # Track original source index for each final position
+    perm_indices = torch.arange(N * N, device=device, dtype=torch.long)
+    
+    # Random order of visits
+    positions = [(i, j) for i in range(N) for j in range(N)]
+    random.shuffle(positions)
+    
+    for i, j in positions:
+        # Sample Gaussian displacements
+        di = random.gauss(0, std)
+        dj = random.gauss(0, std)
+        
+        # Round to nearest integer offset
+        ti = max(0, min(N - 1, round(i + di)))
+        tj = max(0, min(N - 1, round(j + dj)))
+        
+        src_idx = i * N + j
+        tgt_idx = ti * N + tj
+        
+        if src_idx == tgt_idx:
             continue
-
-        # candidate targets: within radius, not self, not already connected, and the target still has remaining slots
-        cand = []
-        for j in allowed_lists[i]:
-            if A[i, j] == 0 and remaining[j] > 0:
-                cand.append(j)
-
-        # if not enough candidates that also have remaining slots, allow candidates that have zero remaining
-        # but we will only create reciprocal edges if target still had room; otherwise skip them.
-        # To be strict about reciprocity we prefer targets with remaining>0 only.
-        if len(cand) == 0:
-            # nothing available that would maintain reciprocity for both sides
-            continue
-
-        # sample up to remaining[i] targets from cand without replacement
-        take = min(remaining[i], len(cand))
-        chosen = random.sample(cand, take)
-
-        for j in chosen:
-            # double-check (race-free in this single-threaded implementation)
-            if remaining[i] <= 0:
-                break
-            if remaining[j] <= 0:
-                continue
-
-            # make reciprocal connection and decrement both remaining counts
-            A[i, j] = 1.0
-            A[j, i] = 1.0
-            remaining[i] -= 1
-            remaining[j] -= 1
-
-    # note: some nodes might not reach desired_k because of limited mutual availability.
-    return A
-
-
-def gaussian_connection_tensor(N, r, p, device=None, dtype=torch.float32):
-    """
-    Returns tensor of shape (N^2, 1, N, N)
-
-    Args:
-        N (int): spatial size
-        r (float): cutoff radius (corresponds to 2*sigma)
-        p (float): fraction of possible connections sampled inside radius
-        device: torch device
-        dtype: tensor dtype
-    """
-    device = device or torch.device("cpu")
-    sigma = r / 2.0
-
-    # coordinate grid
-    xs = torch.arange(N, device=device)
-    ys = torch.arange(N, device=device)
-    grid_y, grid_x = torch.meshgrid(ys, xs, indexing="ij")
-
-    out = torch.zeros((N * N, 1, N, N), device=device, dtype=dtype)
-
-    for k in range(N * N):
-        cy = k // N
-        cx = k % N
-
-        dy = grid_y - cy
-        dx = grid_x - cx
-        dist2 = dx**2 + dy**2
-
-        # mask within cutoff radius
-        mask = dist2 <= r**2
-        if not mask.any():
-            continue
-
-        # Gaussian weights
-        weights = torch.exp(-dist2 / (2 * sigma**2)) * mask
-
-        # number of possible connections
-        num_candidates = mask.sum().item()
-        num_samples = max(1, int(p * num_candidates))
-
-        # flatten candidates
-        flat_weights = weights[mask]
-        probs = flat_weights / flat_weights.sum()
-
-        # sample indices
-        sampled = torch.multinomial(probs, num_samples, replacement=False)
-
-        # write ones
-        idxs = mask.nonzero(as_tuple=False)
-        selected_idxs = idxs[sampled]
-
-        out[k, 0, selected_idxs[:, 0], selected_idxs[:, 1]] = 1.0
-
-    return out
-
+        
+        # Swap values (robust)
+        src_val = data[src_idx].clone()
+        tgt_val = data[tgt_idx].clone()
+        data[src_idx] = tgt_val
+        data[tgt_idx] = src_val
+        
+        # Swap origins
+        src_origin = perm_indices[src_idx].clone()
+        tgt_origin = perm_indices[tgt_idx].clone()
+        perm_indices[src_idx] = tgt_origin
+        perm_indices[tgt_idx] = src_origin
+    
+    permuted_tensor = data.reshape(N, N)
+    
+    # === Compute mean displacement ===
+    # Original positions for each final slot
+    orig_rows = perm_indices // N
+    orig_cols = perm_indices % N
+    
+    # Final positions
+    final_rows = torch.arange(N * N, device=device) // N
+    final_cols = torch.arange(N * N, device=device) % N
+    
+    # Displacements
+    d_rows = (final_rows - orig_rows).float()
+    d_cols = (final_cols - orig_cols).float()
+    
+    if distance_metric == 'euclidean':
+        distances = torch.sqrt(d_rows**2 + d_cols**2)
+    elif distance_metric == 'manhattan':
+        distances = d_rows.abs() + d_cols.abs()
+    else:
+        raise ValueError("distance_metric must be 'euclidean' or 'manhattan'")
+    
+    mean_displacement = distances.mean().item()
+    
+    return permuted_tensor, perm_indices, mean_displacement

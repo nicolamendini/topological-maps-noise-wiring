@@ -9,6 +9,7 @@ from skimage.color import rgb2gray
 import matplotlib.pyplot as plt
 import torch
 import torch.nn.functional as F
+import imageio.v3 as iio 
 
 def get_detectors(gabor_size, discreteness=4, device='cpu'):
 
@@ -48,7 +49,8 @@ def process_image(image_path):
     gray_img = np.array(gray_img, dtype=float)
     
     # Apply Laplacian of Gaussian edge detection
-    log_img = gaussian_laplace(gray_img, sigma=1.5)
+    #log_img = gaussian_laplace(gray_img, sigma=1.2)
+    log_img = gaussian_filter(gray_img, sigma=1.2) - gaussian_filter(gray_img, sigma=4.8)
     inv_log_img = -log_img  # Inverse polarity for the OFF channel
     
     #threshold = 0
@@ -78,8 +80,8 @@ def normalize_channel(channel):
 
 	# Local normalization
 	neighborhood_avg = gaussian_filter(channel, sigma=sigma, mode='constant')
-	eps = 3e-3
-	saturation = 0.5
+	eps = 0.01
+	saturation = 0.3
 	cgc_img = np.tanh((channel / (neighborhood_avg + eps)) * saturation)
 
 	# Convert to 8-bit
@@ -107,11 +109,11 @@ def process_images_in_folder(root_folder, output_folder):
         output_path = os.path.join(output_folder, output_filename)
         
         # Save the processed image in PNG format
-        imsave(output_path, processed_img, format='png')
+        iio.imwrite(output_path, processed_img)   # drop format='png'
 
 # Example usage
 root_folder = './imagenet-mini'  # Change this to your folder path
-output_folder = './input_stimuli'  # Change this to your desired output folder path
+output_folder = './input_stimulixx'  # Change this to your desired output folder path
 # Get the gabor detectors
 gabors = get_detectors(17)
 process_images_in_folder(root_folder, output_folder)
