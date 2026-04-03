@@ -17,12 +17,13 @@ class NeuralSheet(nn.Module):
         R_rf,
         R_long,
         homeo_target=0.04,
-        lat_norm=0.32,
-        aff_norm=0.7,
+        lat_norm=0.3, #topo 0.3 sp 0.33-0.34
+        aff_norm=0.5,
         iterations=30,
         lr=1e-3,
         microcolumnar=True,
-        device='cuda'
+        device='cuda',
+        p = []
     ):
         super().__init__()
 
@@ -37,72 +38,103 @@ class NeuralSheet(nn.Module):
         self.microcolumnar = microcolumnar
 
         self.rf_size = oddenise(R_rf*2)
+        self.rf_size_l3 = oddenise(sheet_size/input_size*R_rf*2)
+        self.rf_size_l3 = oddenise(R_long/1.6*2)
         self.aff_pad = self.rf_size
         self.R_long = R_long
 
         self.aff_cutoff = get_circle(self.rf_size, self.rf_size/2).float().to(device)
+        self.aff_cutoff *= torch.rand(self.aff_cutoff.shape).to(device) > 0.
+        self.aff_cutoff_l3 = get_circle(self.rf_size_l3, self.rf_size_l3/2).float().to(device)
+
+        a=1.8
+        b=1.5
+        c=3
 
         if microcolumnar:
-            a=1.8
-            b=2
-            self.se_cutoff = generate_circles(sheet_size, sheet_size, R_long/a/b/3.7).to(device)
+            self.se_cutoff = generate_circles(sheet_size, sheet_size, R_long/a/b/c).to(device)
             self.i_cutoff = generate_circles(sheet_size, sheet_size, R_long/a/b).to(device)
             self.le_cutoff = generate_circles(sheet_size, sheet_size, R_long/a).to(device) 
+            self.exc_b = 0.3
 
         else:
-            self.se_cutoff = generate_gaussians(sheet_size, sheet_size, R_long/5).to(device)
+            self.se_cutoff = generate_circles(sheet_size, sheet_size, R_long/c).to(device)
             self.i_cutoff = generate_circles(sheet_size, sheet_size, R_long).to(device)
-
+            
         
         afferent_weights = torch.rand((sheet_size**2, 2, self.rf_size, self.rf_size), device=device)
         afferent_weights /= afferent_weights.sum([2,3], keepdim=True)        
         self.afferent_weights = afferent_weights
+
+        afferent_weights_l3 = torch.rand((sheet_size**2, 1, self.rf_size_l3, self.rf_size_l3), device=device)
+        afferent_weights_l3 /= afferent_weights_l3.sum([2,3], keepdim=True)        
+        self.afferent_weights_l3 = afferent_weights_l3
         
         lateral_correlations = torch.rand((sheet_size**2, 1, sheet_size, sheet_size), device=device)
         lateral_correlations /= lateral_correlations.sum([2,3], keepdim=True)
         self.lateral_correlations = lateral_correlations + 0
         self.lateral_correlations_exc = lateral_correlations + 0
-
-        self.aff_sparsity = torch.rand(afferent_weights.shape, device=self.device) < 1
-        self.lat_sparsity = torch.rand(lateral_correlations.shape, device=self.device) < 1
+        self.lateral_correlations_l3 = lateral_correlations + 0
+        self.lateral_correlations_exc_l3 = lateral_correlations + 0
 
         self.current_response = torch.zeros(1, 1, sheet_size, sheet_size, device=device)        
         self.response_tracker = torch.zeros(self.iterations, 1, sheet_size, sheet_size, device=device)
         self.mean_activations = torch.zeros(1, 1, sheet_size, sheet_size, device=device) + self.homeo_target
         self.thresholds = torch.zeros(1, 1, sheet_size, sheet_size, device=device)
-        
         self.mean_fr = torch.zeros(1, 1, sheet_size, sheet_size, device=device)
         self.gains = torch.zeros(1, 1, sheet_size, sheet_size, device=device)
         self.mean_aff = torch.zeros(1, 1, sheet_size, sheet_size, device=device)
         self.aff_strength = torch.zeros(1, 1, sheet_size, sheet_size, device=device)
-        
         self.avg_hist = torch.zeros(10) 
         self.noise = 0
+
+        self.current_response_l3 = torch.zeros(1, 1, sheet_size, sheet_size, device=device)        
+        self.response_tracker_l3 = torch.zeros(self.iterations, 1, sheet_size, sheet_size, device=device)
+        self.mean_activations_l3 = torch.zeros(1, 1, sheet_size, sheet_size, device=device) + self.homeo_target
+        self.thresholds_l3 = torch.zeros(1, 1, sheet_size, sheet_size, device=device)
+        self.mean_fr_l3 = torch.zeros(1, 1, sheet_size, sheet_size, device=device)
+        self.gains_l3 = torch.zeros(1, 1, sheet_size, sheet_size, device=device)
+        self.mean_aff_l3 = torch.zeros(1, 1, sheet_size, sheet_size, device=device)
+        self.aff_strength_l3 = torch.zeros(1, 1, sheet_size, sheet_size, device=device)
+        self.avg_hist_l3 = torch.zeros(10) 
+        self.noise_l3 = 0
 
         r = int(self.R_long//a+1 if self.microcolumnar else self.R_long)
         self.window = oddenise(r*2)
 
         self.init_indices()
-        self.rf_grids = get_grids(input_size, input_size, self.rf_size, sheet_size, device=device)
+        self.rf_grids = get_grids(input_size, input_size, self.rf_size, sheet_size, jitter=0, device=device)
+        self.rf_grids_l3 = get_grids(sheet_size+self.rf_size_l3, sheet_size, self.rf_size_l3, sheet_size, device=device)
         
         self.slicing_var = torch.zeros(
-            (self.sheet_size**2, 3, sheet_size+r*2, sheet_size+r*2), 
+            (self.sheet_size**2, 4, sheet_size+r*2, sheet_size+r*2), 
             device=device
         )
 
         self.delta_mag = torch.zeros(1, 1, sheet_size, sheet_size, device=device)
 
+        if len(p):
+            self.p1 = p[1]
+            self.p2 = p[2]
+
     def forward(
         self, 
         input_crop,
         noise_gamma=0, 
-        adaptation=True
+        noise_beta=0.8,
+        adaptation=True,
+        sparsity=0,
+        layer_3=True
     ):
         
         self.current_response *= 0
         self.response_tracker *= 0
+        self.current_response_l3 *= 0
+        self.response_tracker_l3 *= 0
+        self.current_tiles_l3 = 0
         
         net_afferent = 0
+        net_afferent_l3 = 0
         break_flag = False
         
         current_input = input_crop
@@ -111,9 +143,13 @@ class NeuralSheet(nn.Module):
         afferent = self.current_tiles * self.get_aff_weights()
         afferent = afferent.sum([1,2,3])
         self.current_afferent = afferent.view(self.current_response.shape) 
+        net_afferent = self.current_afferent * self.aff_strength
 
-        net_afferent = (self.current_afferent) * self.aff_strength
-
+        if sparsity:
+            self.lat_sparsity = torch.rand(self.lateral_correlations.shape, device=self.device) < (1-sparsity)
+        else:
+            self.lat_sparsity = 1
+            
         self.update_interactions()
         
         pad_amount = self.window // 2
@@ -129,19 +165,32 @@ class NeuralSheet(nn.Module):
             le_padded = F.pad(self.l_exc, (pad_amount, pad_amount, pad_amount, pad_amount))
             self.slicing_var[:, 2:3] = le_padded
 
+            se_padded_l3 = F.pad(self.l_exc_l3, (pad_amount, pad_amount, pad_amount, pad_amount))
+            self.slicing_var[:, 3:4] = se_padded_l3
+
         sliced_interactions = self.slicing_var[self.batch_indices, :, self.final_row_indices, self.final_col_indices]
 
         se_crops = sliced_interactions[:,:,:,:,0]
         i_crops = sliced_interactions[:,:,:,:,1]
         le_crops = sliced_interactions[:,:,:,:,2]
+        le_crops_l3 = sliced_interactions[:,:,:,:,3]
 
         if self.microcolumnar:
+            
+            lat_interactions = self.exc_b*se_crops + (1-self.exc_b)*le_crops - i_crops
 
-            lat_interactions = (0.32*se_crops + 0.8*le_crops) - i_crops #.32 / .8
+            local_int = self.exc_l3 - self.inh_l3
+            
+            l4_l3_int = (self.exc_b*se_crops + (1-self.exc_b)*le_crops_l3) - i_crops
 
         else:
 
             lat_interactions = se_crops - i_crops
+
+            local_int = self.exc_l3 - self.inh_l3
+
+            l4_l3_int = 1.5*se_crops - i_crops
+
 
         for i in range(self.iterations):
 
@@ -149,36 +198,62 @@ class NeuralSheet(nn.Module):
 
                 if i==0:
                     self.noise = torch.randn(self.current_response.shape, device=self.device) 
+                    self.noise_l3 = torch.randn(self.current_response.shape, device=self.device) 
 
                 else:
                     curr_noise = torch.randn(self.current_response.shape, device=self.device) 
-                    beta = 0.8
-                    self.noise = self.noise * beta + curr_noise * (1-beta)
+                    self.noise = self.noise * noise_beta + curr_noise * (1-noise_beta)
                     self.noise /= (self.noise**2).mean()**0.5
+
+                    curr_noise_l3 = torch.randn(self.current_response.shape, device=self.device) 
+                    self.noise_l3 = self.noise_l3 * noise_beta + curr_noise_l3 * (1-noise_beta)
+                    self.noise_l3 /= (self.noise_l3**2).mean()**0.5
 
             else:
                 self.noise = 0
+                self.noise_l3 = 0
             
             padded_response = F.pad(self.current_response, (self.window//2, self.window//2, self.window//2, self.window//2))
             res_tiles = F.unfold(padded_response, self.window)[0].T.view(-1,1,self.window,self.window)
-
-            lateral_delta = (lat_interactions * res_tiles).sum([2,3]).view(self.current_response.shape) * self.gains
+            mex_hat = (lat_interactions * res_tiles).sum([2,3]).view(self.current_response.shape) 
+            lateral_delta = mex_hat * self.gains
             
-            #se = (se_crops * res_tiles).sum([2,3]).view(self.current_response.shape)
-            #le = (le_crops * res_tiles).sum([2,3]).view(self.current_response.shape)
+            #l4_l3_exc = (((0.33*se_crops + 0.8*le_crops) - i_crops) * res_tiles).sum([2,3]).view(self.current_response.shape) #* self.balance_l3
+            if layer_3:
+                net_afferent_l3 = (l4_l3_int * res_tiles).sum([2,3]).view(self.current_response.shape) * self.aff_strength_l3
+                
+                #if microcolumnar:
+                #    l4_l3_exc = ((se_crops - i_crops) * res_tiles).sum([2,3]).view(self.current_response.shape) * self.aff_strength_l3 
+                #else:
+                #    l4_l3_exc = ((se_crops - i_crops) * res_tiles).sum([2,3]).view(self.current_response.shape) * self.aff_strength_l3 #* self.balance_l3
+                #global_interaction = self.global_exc_l3 + self.global_inh_l3
+                #local_interaction = self.inh_l3 
+                #interaction_l3 = global_interaction*(1-self.balance_l3) - local_interaction*self.balance_l3
+    
+                loc_b = self.p1
+                global_int = self.global_exc_l3 - self.global_inh_l3
+                interaction_l3 = global_int * (1-loc_b) + local_int * loc_b
+                lateral_delta_l3 = (interaction_l3 * self.current_response_l3).sum([1,2,3]).view(self.current_response_l3.shape)
             
-            update = net_afferent + lateral_delta 
-                        
+            update = lateral_delta + net_afferent  
             self.current_response = torch.tanh(torch.relu(update - self.thresholds + self.noise * noise_gamma)) 
-
             self.response_tracker[i] = self.current_response + 0
 
+            if layer_3:
 
-        beta = self.current_response
-        self.delta_mag = (1-beta) * self.delta_mag + beta * lateral_delta
+                delta_l3 = lateral_delta_l3 * self.gains_l3
+    
+                #b = 0.95
+                #update_l3 = l4_l3_exc * (1-b) + delta_l3 * b
+                update_l3 = net_afferent_l3 + delta_l3
+                
+                self.current_response_l3 = torch.tanh(torch.relu(update_l3 - self.thresholds_l3 +  self.noise_l3 * noise_gamma)) 
+                self.response_tracker_l3[i] = self.current_response_l3 + 0
 
         
         if adaptation:
+
+            beta = self.current_response
 
             self.mean_fr = self.mean_fr * (1 - beta) + self.current_response * beta
             gap = (self.mean_fr.mean() - self.lat_norm) / self.lat_norm
@@ -197,15 +272,57 @@ class NeuralSheet(nn.Module):
             thresh_update = (self.homeo_target - self.mean_activations) / self.homeo_target
             self.thresholds -= thresh_update * self.homeo_lr 
             self.thresholds = self.thresholds.clip(-1,1)
+
+            if layer_3:
+
+                beta = self.current_response_l3
+
+                self.delta_mag = (1-beta) * self.delta_mag + beta * lateral_delta_l3
+    
+                self.lat_norm_l3 = self.lat_norm
+                self.mean_fr_l3 = self.mean_fr_l3 * (1 - beta) + self.current_response_l3 * beta
+                gap = (self.mean_fr_l3.mean() - self.lat_norm_l3) / self.lat_norm_l3
+                self.gains_l3 -= gap * self.homeo_lr
+                self.gains_l3 = self.gains_l3.clip(0)
+                #self.gains_l3 = self.gains_l3 *0 + 2.8
+    
+                self.aff_norm_l3 = self.p2
+                self.mean_aff_l3 = self.mean_aff_l3 * (1 - beta) + net_afferent_l3 * beta 
+                gap = (self.mean_aff_l3.mean() - self.aff_norm_l3) / self.aff_norm_l3
+                self.aff_strength_l3 -= gap * self.homeo_lr
+                self.aff_strength_l3 = self.aff_strength_l3.clip(0)
+                #elf.aff_strength_l3 = self.aff_strength_l3 *0 + 2
+    
+                new_hist = np.histogram(self.current_response_l3[self.current_response_l3>0].cpu(), bins=10, range=(0,1))[0]
+                self.avg_hist_l3 = self.avg_hist_l3*(1-self.homeo_lr) + new_hist*self.homeo_lr
+
+                self.homeo_target_l3 = self.homeo_target
+                self.mean_activations_l3 = self.mean_activations_l3*(1-self.homeo_lr) + self.current_response_l3*self.homeo_lr
+                thresh_update = (self.homeo_target_l3 - self.mean_activations_l3) / self.homeo_target_l3
+                self.thresholds_l3 -= thresh_update * self.homeo_lr 
+                self.thresholds_l3 = self.thresholds_l3.clip(-1,1)
             
                         
     def hebbian_step(self):
 
         self.step(self.afferent_weights, self.current_tiles, self.current_response.view(-1,1,1,1))
         self.step(self.lateral_correlations, self.current_response, self.current_response.view(-1,1,1,1))
-        thresh = 0.05
+        thresh = 0.04
         self.step(self.lateral_correlations_exc, self.current_response, (self.current_response.view(-1,1,1,1) - thresh), unlearning=0e-3)
+
+        self.step(self.afferent_weights_l3, self.current_tiles_l3, self.current_response_l3.view(-1,1,1,1))
+        self.step(self.lateral_correlations_l3, self.current_response_l3, 4*self.current_response_l3.view(-1,1,1,1))
+
+        thresh = 0.08
         
+        #s = 4
+        #w = torch.exp(- s * torch.linspace(0, 1, self.iterations, device=self.device)).view(-1,1,1,1)
+        #w /= w.sum()
+        #self.trace = self.response_tracker_l3 * w
+        #self.trace = self.trace.sum(0, keepdim=True)
+        
+        self.step(self.lateral_correlations_exc_l3, self.current_response_l3, 4*(self.current_response_l3.view(-1,1,1,1) - thresh), unlearning=0e-3)
+        #self.step(self.lateral_correlations_exc_l3, self.trace, 10*(self.trace.view(-1,1,1,1) - thresh), unlearning=0e-3)
 
     def step(self, weights, target, response, unlearning=0):
 
@@ -217,23 +334,52 @@ class NeuralSheet(nn.Module):
         
     def get_aff_weights(self):
 
-        aff_weights = self.afferent_weights * self.aff_cutoff * self.aff_sparsity
+        aff_weights = self.afferent_weights * self.aff_cutoff
+        aff_weights /= aff_weights.sum([1,2,3], keepdim=True) + 1e-11
+        return aff_weights
+
+    def get_aff_weights_l3(self):
+
+        aff_weights = self.afferent_weights_l3 * self.aff_cutoff_l3
         aff_weights /= aff_weights.sum([1,2,3], keepdim=True) + 1e-11
         return aff_weights
         
 
     def update_interactions(self):
 
-        self.inh = self.i_cutoff * self.lateral_correlations #* (1 - self.se_cutoff)
+        self.inh = self.i_cutoff * self.lateral_correlations
         self.inh /= self.inh.sum([2,3], keepdim=True)
 
-        self.s_exc = self.se_cutoff + 0 #* self.lateral_correlations
+        self.inh_l3 = self.i_cutoff * self.lateral_correlations_l3
+        self.inh_l3 /= self.inh_l3.sum([2,3], keepdim=True)
+
+        self.exc_l3 = self.se_cutoff #* self.lateral_correlations_l3
+        self.exc_l3 /= self.exc_l3.sum([2,3], keepdim=True)
+
+        self.s_exc = self.se_cutoff #* self.lateral_correlations
         self.s_exc /= self.s_exc.sum([2,3], keepdim=True)
 
         if self.microcolumnar:
 
-            self.l_exc = self.le_cutoff * self.lateral_correlations_exc * self.lat_sparsity
+            self.l_exc = self.le_cutoff * self.lateral_correlations_exc #* self.lat_sparsity
             self.l_exc /= self.l_exc.sum([2,3], keepdim=True) + 1e-11
+
+            self.l_exc_l3 = self.le_cutoff * self.lateral_correlations_exc
+            self.l_exc_l3 /= self.l_exc_l3.sum([2,3], keepdim=True) + 1e-11
+
+            #adjust = self.le_cutoff.sum([1,2,3], keepdim=True)
+            #adjust /= adjust.max()
+            #self.l_exc *= adjust
+            
+        
+        adjust = (self.lateral_correlations_exc_l3**2).sum([1,2,3], keepdim=True)
+        adjust /= adjust.mean()
+
+        self.global_exc_l3 = self.lateral_correlations_exc_l3 * self.lat_sparsity + 1e-11
+        self.global_exc_l3 /= (self.global_exc_l3).sum([1,2,3], keepdim=True) * adjust
+        
+        self.global_inh_l3 = self.lateral_correlations_l3 * self.lat_sparsity + 1e-11
+        self.global_inh_l3 /= (self.global_inh_l3).sum([1,2,3], keepdim=True) * adjust
 
 
     def init_indices(self):

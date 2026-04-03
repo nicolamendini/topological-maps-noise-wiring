@@ -276,7 +276,7 @@ def init_nn(input_size, output_size, out_channels=2, device='cuda'):
         ('dense', out_channels*output_size**2, input_size**2),
         ('relu', ),
         ('dense', out_channels*output_size**2, out_channels*output_size**2),
-        ('relu', ),
+        #('relu', ),
         ('unflatten', out_channels, output_size)
     ]
     
@@ -313,7 +313,7 @@ def nn_loss(network, true_input, reco_input):
 
     mse = ((true_input - reco_input)**2).mean([1,2,3])
 
-    l1 = sum([list(network['model'].layers[l].parameters())[0].abs().sum() if list(network['model'].layers[l].parameters()) else 0 for l in range(len(network['structure']))])
+    l1 = sum([list(network['model'].layers[l].parameters())[0].square().sum() if list(network['model'].layers[l].parameters()) else 0 for l in range(len(network['structure']))])
 
     loss = mse.mean() + l1 * 1e-5
     loss_std = mse.std()

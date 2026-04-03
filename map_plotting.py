@@ -22,6 +22,7 @@ from matplotlib import colors as mcolors
 import matplotlib as mpl
 from torchvision.transforms.functional import rotate
 from torchvision.transforms import InterpolationMode
+import math
 
 from wiring_efficiency_utils import *
 
@@ -172,6 +173,12 @@ def show_map(model, network, random_sample=None):
     plt.imshow(img, cmap=cm.Greys)
     plt.title(titles[0])
 
+    reco_input = network['activ'](network['model'](model.current_response))[0,0].detach().cpu()
+    # nn reconstruction
+    plt.subplot(4, 4, 14)
+    plt.imshow(reco_input)
+    plt.title('reco')
+
     # Afferent weights of a random sample
     aff_weights = model.get_aff_weights()[random_sample, 0] #- model.afferent_weights[random_sample, 1]
     aff_weights[0,0] = 0
@@ -214,10 +221,9 @@ def show_map(model, network, random_sample=None):
     plt.title(titles[6])
 
     # Generate and display orientation and phase maps
-    weights = model.get_aff_weights().clone()
     M = int(np.sqrt(model.afferent_weights.shape[0]))  # Assuming MxM grid for reshaping
-    ori_map = detect_orientation_map_from_aff_weights(model.get_aff_weights())['pref'] / 180 * np.pi
-    ori_map = ori_map.reshape(M, M).cpu()
+    ori_map = compute_orientation_maps(model, model.current_input.shape[-1], device=model.device)[0].cpu()
+    #ori_map = detect_orientation_map_from_aff_weights(model.get_aff_weights())['pref'].view(M,M).cpu()
     
     # Orientation map
     plt.subplot(4, 4, 9)
@@ -239,12 +245,6 @@ def show_map(model, network, random_sample=None):
     plt.subplot(4, 4, 8)
     plt.stairs(model.avg_hist.int(), torch.linspace(0,1,11), fill=True)
     plt.title(titles[11])
-
-    reco_input = network['activ'](network['model'](model.current_response))[0,0].detach().cpu()
-    # nn reconstruction
-    plt.subplot(4, 4, 14)
-    plt.imshow(reco_input)
-    plt.title('reco')
 
     # thresholds
     #thresholds[0,0] = 0
@@ -271,6 +271,152 @@ def show_map(model, network, random_sample=None):
     print('Mean current response: {:.3f}'.format(model.current_response.mean()))
     loss = torch.mean((reco_input - img)**2)
     print('Reco loss: {:.3f}%'.format(loss))
+
+
+    plt.show()
+
+
+def show_map_l3(model, network, random_sample=None):
+
+    plt.figure(figsize=(12, 14))
+    titles = [
+        "Current Input", "Afferent Weights", "Current Aff Response", "Inhibitory weights",
+        "Lateral correlations", "Current Response", "Current Response Histogram",
+        "Orientation Map", "Orientation Histogram", "LRE", "Fourier domain", "Mean Histogram",
+        "Reconstruction", "Thresholds", "Excitatory weights", "Mean Frs"
+    ]
+
+    # Displaying the model's current input
+    img = model.current_response[0, 0].detach().cpu()
+    #c = model.rf_size // 2
+    #img = img[c:-c,c:-c]
+    plt.subplot(4, 4, 1)
+    plt.imshow(img, cmap=cm.Greys)
+    plt.title(titles[0])
+
+    reco_input = network['activ'](network['model'](model.current_response_l3))[0,0].detach().cpu()
+    plt.subplot(4, 4, 14)
+    plt.imshow(reco_input)
+    plt.title('reco')
+
+    # Afferent weights of a random sample
+    aff_weights = model.get_aff_weights_l3()[random_sample, 0] #- model.afferent_weights[random_sample, 1]
+    aff_weights[0,0] = 0
+    plt.subplot(4, 4, 12)
+    plt.imshow(aff_weights.detach().cpu())
+    plt.title(titles[1])
+
+    if False:
+        # Afferent weights of a random sample
+        net_afferent = model.current_afferent_l3[0,0].detach().cpu() - model.thresholds_l3[0,0].detach().cpu()
+        net_afferent_bar = net_afferent + 0
+        net_afferent_bar[0,0] = 0
+        plt.subplot(4, 4, 2)
+        plt.imshow(net_afferent_bar)
+        plt.title(titles[2])
+
+        # Lateral correlations of the random sample
+        plt.subplot(4, 4, 4)
+        #plotvar = model.long_interactions[random_sample, 0]#* model.eye[random_sample, 0]
+        inh = model.inh_l3
+        plotvar = inh[random_sample, 0]
+        plotvar[0,0] = 0
+        plt.imshow(plotvar.detach().cpu())
+        plt.title(titles[3])
+
+    # Lateral weights excitation of the random sample
+    plt.subplot(4, 4, 5)
+    plotvar = model.lateral_correlations_l3[random_sample, 0]
+    plt.imshow(plotvar.detach().cpu())
+    plt.title(titles[4])
+
+    # Model's current response
+    plt.subplot(4, 4, 6)
+    plt.imshow(model.current_response_l3[0, 0].detach().cpu(), cmap=cm.Greys)
+    plt.title(titles[5])
+
+    # Histogram of the current response
+    plt.subplot(4, 4, 7)
+    hist = model.current_response_l3.flatten().detach().cpu().numpy()
+    plt.hist(hist[hist > 0], range=(0,1))
+    plt.title(titles[6])
+
+    M = int(np.sqrt(model.afferent_weights.shape[0]))  # Assuming MxM grid for reshaping
+
+    exc = model.global_exc_l3
+    plt.subplot(4, 4, 13)
+    plt.imshow(exc[random_sample,0].view(M,M).cpu())
+    plt.title(titles[-7])
+
+    ori_map = compute_orientation_maps(model, model.current_input.shape[-1], device=model.device)[1].cpu()
+    # -------------------------------------------------------------------------------
+    
+    # Orientation map
+    plt.subplot(4, 4, 9)
+    plt.imshow(ori_map, cmap='hsv')
+    plt.title(titles[7])
+
+    # Orientation histogram
+    plt.subplot(4, 4, 10)
+    hist_map = ori_map.flatten()
+    plt.hist(hist_map, bins=10)
+    plt.title(titles[8])
+
+    # Retinotopic Bias
+    plt.subplot(4, 4, 11)
+    _,ring,_ = get_typical_dist_fourier(ori_map, 0)
+    plt.imshow(ring.cpu(), cmap=cm.Greys)
+    plt.title(titles[10])
+
+    plt.subplot(4, 4, 8)
+    plt.stairs(model.avg_hist_l3.int(), torch.linspace(0,1,11), fill=True)
+    plt.title(titles[11])
+
+    # thresholds
+    #thresholds[0,0] = 0
+    plt.subplot(4, 4, 3)
+    plt.imshow(model.thresholds_l3.view(M,M).cpu())
+    plt.title('thresh')
+
+    plt.subplot(4,4,15)
+    plt.plot(model.response_tracker_l3[:model.iterations].sum([1,2,3]).cpu(), color='black')
+    plt.title('mean act')
+
+    # ---- Create L4 coordinate maps (retinotopy field) --------------------------
+    coords = torch.linspace(-1, 1, M, device=model.device)
+    yy, xx = torch.meshgrid(coords, coords, indexing='ij')
+    
+    xx = xx.view(1,1,M,M)
+    yy = yy.view(1,1,M,M)
+    
+    # ---- Extract local L4 patches for each L3 neuron ---------------------------
+    x_patch = extract_patches(xx, model.rf_grids_l3)
+    y_patch = extract_patches(yy, model.rf_grids_l3)
+    
+    w3 = model.get_aff_weights_l3()
+    
+    # normalize weights inside each RF
+    w3 = w3 / (w3.sum([1,2,3], keepdim=True) + 1e-8)
+    
+    # ---- Weighted spatial average ---------------------------------------------
+    cx = (x_patch * w3).sum([1,2,3])
+    cy = (y_patch * w3).sum([1,2,3])
+    
+    l3_centers = torch.stack([cx, cy], dim=1)
+
+    plt.subplot(4, 4, 16)
+
+    grid_x = l3_centers[:,0].reshape(M, M).cpu()
+    grid_y = l3_centers[:,1].reshape(M, M).cpu()
+    
+    for i in range(M):
+        plt.plot(grid_x[i,:], grid_y[i,:], 'k-', linewidth=0.5)
+    for j in range(M):
+        plt.plot(grid_x[:,j], grid_y[:,j], 'k-', linewidth=0.5)
+    
+    plt.gca().set_aspect('equal')
+    plt.xticks([])
+    plt.yticks([])
 
 
     plt.show()
@@ -847,6 +993,7 @@ def fit_and_plot(
 
     x = x.float()
     y = y.float()
+
     c_curves, p = y.shape
 
     fit_func = str(fit_func).lower().strip()
@@ -860,7 +1007,7 @@ def fit_and_plot(
     x0 = torch.zeros(c_curves, dtype=torch.float32)  # used for log fit
 
     colors = sns.color_palette(cmap, n_colors=c_curves)
-    marker_list = ["o", "s", "^", "D", "v", "P", "X", "*"]
+    marker_list = ["o", "s", "^", "D", "v", "P", "X", "*"]        
 
     plt.figure(figsize=(7, 6))
 
@@ -1023,13 +1170,24 @@ def fit_and_plot(
         if marker_mode:
             marker_i = marker_list[i % len(marker_list)]
 
-        color_i = colors[i]
+        if color is not None:
+
+            if type(color) is list:
+                
+                color_i = color[i]
+
+            else:
+
+                color_i = color
+        else:
+
+            color_i = colors[i]
         
         if scatter:
             plt.scatter(
                 xi.detach().cpu().numpy(),
                 yi.detach().cpu().numpy(),
-                color=color_i if not color else color,
+                color=color_i,
                 marker=marker_i,
                 s=s,
                 linewidths=2 if marker_mode else 0,
@@ -1041,7 +1199,7 @@ def fit_and_plot(
             plt.plot(
                 xi.detach().cpu().numpy(),
                 yi.detach().cpu().numpy(),
-                color=color_i if not color else color,
+                color=color_i,
                 marker=marker_i if marker_mode else None,
                 linewidth=2
             )
@@ -1287,3 +1445,161 @@ def detect_orientation_map_from_aff_weights(
         "r_theta": r_theta_all,       # [N,K]
         "thetas": (thetas * (180.0 / math.pi) if return_degrees else thetas),  # [K]
     }
+
+
+def _make_sine_grating(
+    W: int,
+    theta_rad: float,
+    spatial_freq_cyc_per_px: float,
+    phase_rad: float,
+    device=None,
+    dtype=None,
+) -> torch.Tensor:
+    yy, xx = torch.meshgrid(
+        torch.linspace(-(W - 1) / 2, (W - 1) / 2, W, device=device, dtype=dtype),
+        torch.linspace(-(W - 1) / 2, (W - 1) / 2, W, device=device, dtype=dtype),
+        indexing="ij",
+    )
+    x_prime = xx * math.cos(theta_rad) + yy * math.sin(theta_rad)
+    return torch.sin(2.0 * math.pi * spatial_freq_cyc_per_px * x_prime + phase_rad)
+
+
+def compute_orientation_maps(
+    model,
+    W: int,
+    *,
+    device: Optional[torch.device] = None,
+    dtype: Optional[torch.dtype] = None,
+    n_orientations: int = 12,
+    n_phases: int = 4,
+    spatial_freq_cyc_per_px: float = 0.05,
+    contrast: float = 1.0,
+    scaler: float = 0.3,
+    rectify: bool = True,
+    use_vector_sum: bool = True,
+    reset_fn: Optional[str] = "reset_state",
+    settle_repeats: int = 1,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Computes two orientation preference maps at once:
+      - ori_map: from model.current_response (L4-like)
+      - ori_map_l3: from model.current_response_l3 (L2/3-like)
+
+    Both returned maps are 2D tensors in radians in [0, π), ready for:
+        plt.imshow(map.cpu(), cmap="hsv", vmin=0, vmax=math.pi)
+
+    Assumes your model forward is called as model(x, adaptation=False) (as in your NeuralSheet).
+    """
+
+    if device is None:
+        try:
+            device = next(model.parameters()).device
+        except StopIteration:
+            device = torch.device(getattr(model, "device", "cpu"))
+    if dtype is None:
+        try:
+            dtype = next(model.parameters()).dtype
+        except StopIteration:
+            dtype = torch.float32
+
+    def _maybe_reset():
+        if reset_fn is None:
+            return
+        fn = getattr(model, reset_fn, None)
+        if callable(fn):
+            fn()
+
+    def _reduce_to_2d(r: torch.Tensor) -> torch.Tensor:
+        r = r.to(device=device)
+        if r.dim() >= 3 and r.shape[0] == 1:
+            r = r[0]
+        if r.dim() == 2:
+            r2 = r
+        elif r.dim() == 3:
+            # (C,H,W) -> mean over channels
+            r2 = r.mean(dim=0)
+        elif r.dim() == 1:
+            n = r.numel()
+            s = int(round(math.sqrt(n)))
+            if s * s != n:
+                raise ValueError(f"1D response length {n} is not a perfect square.")
+            r2 = r.view(s, s)
+        else:
+            raise ValueError(f"Unsupported response shape: {tuple(r.shape)}")
+
+        if rectify:
+            return torch.relu(r2)
+        return r2.abs()
+
+    # Orientations in [0, π)
+    thetas = torch.linspace(0.0, math.pi, n_orientations + 1, device=device, dtype=torch.float32)[:-1]
+    phases = torch.linspace(0.0, 2.0 * math.pi, n_phases + 1, device=device, dtype=torch.float32)[:-1]
+
+    resp_maps_per_ori = []
+    resp_maps_l3_per_ori = []
+
+    for theta in thetas.tolist():
+        phase_accum = None
+        phase_accum_l3 = None
+
+        for ph in phases.tolist():
+            stim = _make_sine_grating(
+                W=W,
+                theta_rad=float(theta),
+                spatial_freq_cyc_per_px=spatial_freq_cyc_per_px,
+                phase_rad=float(ph),
+                device=device,
+                dtype=dtype,
+            )
+            stim = (stim + 1.0) * (contrast * scaler)
+
+            x = stim
+            x_4d = x.unsqueeze(0).unsqueeze(0)  # (1,1,W,W)
+
+            _maybe_reset()
+            for _ in range(max(1, int(settle_repeats))):
+                try:
+                    model(x, adaptation=False)
+                except Exception:
+                    model(x_4d, adaptation=False)
+
+            r = model.current_response
+            r_l3 = model.current_response_l3
+            if not torch.is_tensor(r):
+                r = torch.as_tensor(r, device=device)
+            if not torch.is_tensor(r_l3):
+                r_l3 = torch.as_tensor(r_l3, device=device)
+
+            r2 = _reduce_to_2d(r)
+            r2_l3 = _reduce_to_2d(r_l3)
+
+            phase_accum = r2 if phase_accum is None else (phase_accum + r2)
+            phase_accum_l3 = r2_l3 if phase_accum_l3 is None else (phase_accum_l3 + r2_l3)
+
+        resp_maps_per_ori.append(phase_accum / float(len(phases)))
+        resp_maps_l3_per_ori.append(phase_accum_l3 / float(len(phases)))
+
+    R = torch.stack(resp_maps_per_ori, dim=0)        # (n_ori, H, W)
+    R_l3 = torch.stack(resp_maps_l3_per_ori, dim=0)  # (n_ori, H, W)
+
+    # remove orientation-mean component per pixel (helps with global DC / uniform activation)
+    R = R - R.mean(dim=0, keepdim=True)
+    R_l3 = R_l3 - R_l3.mean(dim=0, keepdim=True)
+
+    def _ori_from_stack(Rstack: torch.Tensor) -> torch.Tensor:
+        if use_vector_sum:
+            twotheta = 2.0 * thetas
+            cos2 = torch.cos(twotheta).view(-1, 1, 1).to(device)
+            sin2 = torch.sin(twotheta).view(-1, 1, 1).to(device)
+            vx = (Rstack * cos2).sum(dim=0)
+            vy = (Rstack * sin2).sum(dim=0)
+            ori = 0.5 * torch.atan2(vy, vx)
+            return torch.remainder(ori, math.pi)
+        else:
+            idx = torch.argmax(Rstack, dim=0)
+            return thetas[idx].to(device)
+
+    ori_map = _ori_from_stack(R)
+    ori_map_l3 = _ori_from_stack(R_l3)
+
+    return ori_map, ori_map_l3
