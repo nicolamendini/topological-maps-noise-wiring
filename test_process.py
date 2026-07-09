@@ -70,10 +70,9 @@ def sample_and_plot_histogram_and_images(target_folder):
     axes[1, 1].axis('off')  # Turn off axis labels
 
     plt.tight_layout()
-    plt.savefig("on_off_histogram.png", dpi=300)
+    plt.savefig("figures/root_exports/on_off_histogram.png", dpi=300)
     plt.close()
 
 # Example usage
 target_folder = './input_stimuli'  # Change this to your target folder path
 sample_and_plot_histogram_and_images(target_folder)
-

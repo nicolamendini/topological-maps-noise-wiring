@@ -1,26 +1,43 @@
-imagenet_mini/
-/audio
-/__pycache__
-/imagenet-mini
-/input_stimuli
-/.ipynb_checkpoints
-.git
-/fig1
-/endless_motion.ipynb
-data_cosine.pt
-data.pt
-state.pt
-cute_grid.ipybn
-/input_stimuli_1.2
-/input_stimuli_2.0
-/input_stimuli_1.5
-/input_stimuli
-/x_processed_32.pt
-/x_processed_32_high.pt
+# Track only source-like files in the repository root plus helper modules.
+*
+!*/
 
-input_stimuli_triangle/
-brain_observatory_cache/
-path/
-imagenet-mini/
+!/.gitignore
+!/README.md
+!/AGENTS.md
+!/*.py
+!/*.ipynb
 
-neuro.pt
+!/helpers/
+!/helpers/*.py
+
+# Generated outputs, datasets, and exploratory side projects.
+/audio/**
+/data_l3/**
+/data_l4/**
+/figures/**
+/logs/**
+/parameter_search_data/**
+/run_status/**
+
+/input_stimuli/**
+/input_stimuli_*/**
+/input_stimuli_triangle/**
+/imagenet-mini/**
+/imagenet_mini/**
+/brain_observatory_cache/**
+/path/**
+
+# Python/Jupyter/runtime noise.
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Large or transient tensors/checkpoints.
+*.pt
+*.pth
+*.ckpt
+*.lprof

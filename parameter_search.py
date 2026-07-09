@@ -4,10 +4,11 @@ from pathlib import Path
 import numpy as np
 import torch
 from tqdm.auto import tqdm
+import sys
 
 from neuralsheet import NeuralSheet
-from wiring_efficiency_utils import *
-from map_plotting import *
+from helpers.wiring_efficiency_utils import *
+from helpers.map_plotting import *
 
 
 # -----------------------------
@@ -19,25 +20,32 @@ num_workers = 4
 root_dir = './input_stimuli'
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 beta = 1 - 5e-5
-loss_beta = 3e-3
+loss_beta = 1e-2
 R_rf = 7
 
 dataloader = create_dataloader(root_dir, crop_size, batch_size, num_workers)
 
 # Keep these exactly as requested.
-trialvar = [9]
-sizesvar = [30]
-noise_vals = [0.05]
+#trialvar = np.linspace(9**2, 18**2, 9)**(1/2) #[9]
+sizesvar = torch.tensor([40]) # np.round(np.linspace(30**2, 60**2, 10)**(1/2)) 
+trialvar = torch.tensor([12]) #sizesvar * 3/10
+print(trialvar,sizesvar)
+noise_vals = np.ones(len(trialvar),) * 0.05 #[0.05]*15
 
-sparsity_vals = torch.arange(0.8, 1, 0.005)
+if trialvar.shape[0] == sizesvar.shape[0] and sizesvar.shape[0] == noise_vals.shape[0]:
+    print('shapes matching')
+else:
+    print('shapes MISMATCHING!')
+
+sparsity_vals = torch.linspace(0, 0.99, 100) #1 - 1/torch.linspace(1, 100, 100)
 
 # 1 epoch is enough.
 epochs = 1
 
 # Parameter grids
-p0_values = [0] * 5
-p1_values = np.arange(0, 0.6, 0.1)
-p2_values = np.arange(0.05, 0.35, 0.05)
+p0_values = [0.04] * 10
+p1_values = [0.5] #np.linspace(0.1, 0.6, 6)
+p2_values = [0.2] #np.linspace(0.04, 0.24, 6)
 
 runs = len(p0_values) * len(p1_values) * len(p2_values) * len(sizesvar) * 2
 print('# EXPECTED RUNS: ' + str(runs))
@@ -46,7 +54,7 @@ print(p2_values)
 
 # Evaluation settings
 DIM_MAX_BATCHES = 151
-ROBUSTNESS_SAMPLES = 1000
+ROBUSTNESS_SAMPLES = 500
 ROBUSTNESS_SIMILARITY_FLOOR = 0.1
 
 
@@ -92,7 +100,7 @@ def train_single_model(microcolumnar, p0: float, p1: float, p2: float, sheet_siz
 
     model.train()
     for _ in range(epochs):
-        batch_progress = tqdm(dataloader, leave=False, desc=f"train R_long={r_long:.2f}")
+        batch_progress = dataloader #tqdm(dataloader, leave=False, desc=f"train R_long={r_long:.2f}", disable=not sys.stdout.isatty())
         for batch in batch_progress:
             batch = batch.to(device)
             batch_responses = []
@@ -107,6 +115,10 @@ def train_single_model(microcolumnar, p0: float, p1: float, p2: float, sheet_siz
                 lr = max(lr * beta, 1e-4)
                 model.hebbian_lr = lr * 1e2
                 model.homeo_lr = lr
+
+                #if lr < 2e-4:
+                #    print('target lr reached, training complete')
+                #    return model, avg_loss
 
                 model(image, adaptation=True)
                 model.hebbian_step()
@@ -132,6 +144,29 @@ def train_single_model(microcolumnar, p0: float, p1: float, p2: float, sheet_siz
             network['optim'].step()
 
     return model, avg_loss
+
+
+def increase_lateral_influence(model):
+
+    #model.p2 = p2_values[0]
+    lr = 5e-4
+    model.hebbian_lr = lr * 1e2
+    model.homeo_lr = lr
+
+    batch_progress = dataloader #tqdm(dataloader, leave=False, desc=f"train R_long={r_long:.2f}", disable=not sys.stdout.isatty())
+    for b_idx, batch in enumerate(batch_progress):
+        batch = batch.to(device)
+
+        if b_idx > 600:
+            break
+    
+        for image in batch:
+            image = image[0:1][None].flip(1)
+    
+            if image.mean() <= 0.15:
+                continue
+    
+            model(image, adaptation=True)
 
 
 @torch.no_grad()
@@ -206,7 +241,7 @@ def compute_robustness(model, s_idx) -> float:
 
 
 @torch.no_grad()
-def compute_sparsity(model, s_idx) -> torch.Tensor:
+def compute_sparsity(model, s_idx, local=False) -> torch.Tensor:
     model.eval()
     total_sims = torch.zeros(len(sparsity_vals), device=device) # Stay on device
     counts = torch.zeros(len(sparsity_vals), device=device)
@@ -214,7 +249,7 @@ def compute_sparsity(model, s_idx) -> torch.Tensor:
     margin = int(float(trialvar[s_idx]) // 2)
     processed_samples = 0
 
-    for batch in tqdm(dataloader, leave=False, desc='sparsity sweep'):
+    for batch in tqdm(dataloader, leave=False, desc='sparsity sweep' if not local else 'local sparsity sweep'):
         batch = batch.to(device)
         for image in batch:
             img = image[0:1][None].flip(1)
@@ -226,7 +261,10 @@ def compute_sparsity(model, s_idx) -> torch.Tensor:
             if dense.mean() <= 0.05: continue
 
             for idx, spa_val in enumerate(sparsity_vals):
-                model(img, adaptation=False, sparsity=float(spa_val))
+                if local:
+                    model(img, adaptation=False, loc_sparsity=float(spa_val))
+                else:
+                    model(img, adaptation=False, sparsity=float(spa_val))
                 perturbed = model.current_response_l3
                 perturbed = center_crop_for_robustness(perturbed, margin)
                 
@@ -256,6 +294,7 @@ def run_search(microcolumnar):
 
     shape_spa = (len(p0_values), len(p1_values), len(p2_values), len(sizesvar), len(sparsity_vals))
     sparsity = torch.full(shape_spa, torch.nan, dtype=torch.float32)
+    loc_sparsity = torch.full(shape_spa, torch.nan, dtype=torch.float32)
     
     shape = (len(p0_values), len(p1_values), len(p2_values), len(sizesvar))
 
@@ -267,11 +306,17 @@ def run_search(microcolumnar):
     total_runs = len(p0_values) * len(p1_values) * len(p2_values)
     grid_progress = tqdm(total=total_runs, desc='p0/p1/p2 grid')
 
+    run_count = 0
+
     for i, p0 in enumerate(p0_values):
         for j, p1 in enumerate(p1_values):
             for k, p2 in enumerate(p2_values):
                 for s in range(len(sizesvar)):
                     clear_memory()
+
+                    run_count += 1
+                    run_no = run_count + (runs//2 if microcolumnar else 0)
+                    print('run number: ', str(run_no), ' out of ', str(runs))
                 
                     # Note: Ensure trialvar is the same length as sizesvar or this will IndexError
                     model, avg_loss = train_single_model(
@@ -286,7 +331,12 @@ def run_search(microcolumnar):
                     eff_dim = compute_dimensionality(model)
                     rob = compute_robustness(model, s)
                     ver_sim = vertical_distance(model)
+
+                    model.p2 = p0_values[i]
+                    increase_lateral_influence(model)
+                    
                     spa = compute_sparsity(model, s)
+                    loc_spa = compute_sparsity(model, s, local=True)
                 
                     # Store directly into the 4th dimension
                     accuracy[i, j, k, s] = avg_loss
@@ -294,6 +344,7 @@ def run_search(microcolumnar):
                     robustness[i, j, k, s] = rob
                     columnarity[i, j, k, s] = ver_sim
                     sparsity[i, j, k, s] = spa
+                    loc_sparsity[i, j, k, s] = loc_spa
                 
                     del model
                     clear_memory()
@@ -319,6 +370,7 @@ def run_search(microcolumnar):
         'robustness': robustness,
         'columnarity': columnarity,
         'sparsity': sparsity,
+        'loc_sparsity': loc_sparsity,
         'config': {
             'crop_size': crop_size,
             'batch_size': batch_size,
@@ -337,8 +389,10 @@ def run_search(microcolumnar):
         },
     }
 
-    title = 'search_results_micro.pt' if microcolumnar else 'search_results_macro.pt'
-    torch.save(results, Path(title))
+    output_dir = Path('parameter_search_data')
+    output_dir.mkdir(exist_ok=True)
+    title = 'search_results_micro_GRID2.pt' if microcolumnar else 'search_results_macro_GRID2.pt'
+    torch.save(results, output_dir / title)
 
 
 if __name__ == '__main__':

@@ -7,7 +7,7 @@ from torch.utils.data import Dataset, DataLoader
 import torch.nn.functional as F
 import random
 
-from wiring_efficiency_utils import *
+from helpers.wiring_efficiency_utils import *
 
 class NeuralSheet(nn.Module):
     def __init__(
@@ -16,9 +16,9 @@ class NeuralSheet(nn.Module):
         sheet_size, 
         R_rf,
         R_long,
-        homeo_target=0.04,
-        lat_norm=0.3, #topo 0.3 sp 0.33-0.34
-        aff_norm=0.5,
+        homeo_target=0.05,
+        lat_norm=0.3,
+        aff_norm=0.7,
         iterations=30,
         lr=1e-3,
         microcolumnar=True,
@@ -39,7 +39,7 @@ class NeuralSheet(nn.Module):
 
         self.rf_size = oddenise(R_rf*2)
         self.rf_size_l3 = oddenise(sheet_size/input_size*R_rf*2)
-        self.rf_size_l3 = oddenise(R_long/1.6*2)
+        self.rf_size_l3 = oddenise(R_long*2/1.8)
         self.aff_pad = self.rf_size
         self.R_long = R_long
 
@@ -47,7 +47,7 @@ class NeuralSheet(nn.Module):
         self.aff_cutoff *= torch.rand(self.aff_cutoff.shape).to(device) > 0.
         self.aff_cutoff_l3 = get_circle(self.rf_size_l3, self.rf_size_l3/2).float().to(device)
 
-        a=1.8
+        a=1.7
         b=1.5
         c=3
 
@@ -55,6 +55,7 @@ class NeuralSheet(nn.Module):
             self.se_cutoff = generate_circles(sheet_size, sheet_size, R_long/a/b/c).to(device)
             self.i_cutoff = generate_circles(sheet_size, sheet_size, R_long/a/b).to(device)
             self.le_cutoff = generate_circles(sheet_size, sheet_size, R_long/a).to(device) 
+            #self.le_cutoff *= generate_gaussians(sheet_size, sheet_size, R_long/a).to(device)
             self.exc_b = 0.3
 
         else:
@@ -76,8 +77,10 @@ class NeuralSheet(nn.Module):
         self.lateral_correlations_exc = lateral_correlations + 0
         self.lateral_correlations_l3 = lateral_correlations + 0
         self.lateral_correlations_exc_l3 = lateral_correlations + 0
+        self.lateral_correlations_l4_l3 = lateral_correlations + 0
+        self.lateral_correlations_exc_l4_l3 = lateral_correlations + 0
 
-        self.current_response = torch.zeros(1, 1, sheet_size, sheet_size, device=device)        
+        self.current_response = torch.zeros(1, 1, sheet_size, sheet_size, device=device)   
         self.response_tracker = torch.zeros(self.iterations, 1, sheet_size, sheet_size, device=device)
         self.mean_activations = torch.zeros(1, 1, sheet_size, sheet_size, device=device) + self.homeo_target
         self.thresholds = torch.zeros(1, 1, sheet_size, sheet_size, device=device)
@@ -107,11 +110,12 @@ class NeuralSheet(nn.Module):
         self.rf_grids_l3 = get_grids(sheet_size+self.rf_size_l3, sheet_size, self.rf_size_l3, sheet_size, device=device)
         
         self.slicing_var = torch.zeros(
-            (self.sheet_size**2, 4, sheet_size+r*2, sheet_size+r*2), 
+            (self.sheet_size**2, 5, sheet_size+r*2, sheet_size+r*2), 
             device=device
         )
 
         self.delta_mag = torch.zeros(1, 1, sheet_size, sheet_size, device=device)
+        self.eye = torch.eye(self.sheet_size**2).view(self.lateral_correlations.shape).to(device)
 
         if len(p):
             self.p1 = p[1]
@@ -124,14 +128,18 @@ class NeuralSheet(nn.Module):
         noise_beta=0.8,
         adaptation=True,
         sparsity=0,
-        layer_3=True
+        loc_sparsity=0,
+        layer_3=False
     ):
-        
+
+        self._last_layer_3 = layer_3
         self.current_response *= 0
         self.response_tracker *= 0
-        self.current_response_l3 *= 0
-        self.response_tracker_l3 *= 0
-        self.current_tiles_l3 = 0
+
+        if layer_3:
+            self.current_response_l3 *= 0
+            self.response_tracker_l3 *= 0
+            self.current_tiles_l3 = 0
         
         net_afferent = 0
         net_afferent_l3 = 0
@@ -149,8 +157,13 @@ class NeuralSheet(nn.Module):
             self.lat_sparsity = torch.rand(self.lateral_correlations.shape, device=self.device) < (1-sparsity)
         else:
             self.lat_sparsity = 1
+
+        if loc_sparsity:
+            self.loc_lat_sparsity = torch.rand(self.lateral_correlations.shape, device=self.device) < (1-loc_sparsity)
+        else:
+            self.loc_lat_sparsity = 1
             
-        self.update_interactions()
+        self.update_interactions(layer_3=layer_3)
         
         pad_amount = self.window // 2
 
@@ -163,33 +176,46 @@ class NeuralSheet(nn.Module):
         if self.microcolumnar:
                     
             le_padded = F.pad(self.l_exc, (pad_amount, pad_amount, pad_amount, pad_amount))
-            self.slicing_var[:, 2:3] = le_padded
+            self.slicing_var[:, 2:3] = le_padded / le_padded.sum([1,2,3], keepdim=True)
 
-            se_padded_l3 = F.pad(self.l_exc_l3, (pad_amount, pad_amount, pad_amount, pad_amount))
-            self.slicing_var[:, 3:4] = se_padded_l3
+        if layer_3:
 
-        sliced_interactions = self.slicing_var[self.batch_indices, :, self.final_row_indices, self.final_col_indices]
+            i_padded_l4_l3 = F.pad(self.inh_l4_l3, (pad_amount, pad_amount, pad_amount, pad_amount))
+            self.slicing_var[:, 3:4] = i_padded_l4_l3
+
+            if self.microcolumnar:
+
+                le_padded_l4_l3 = F.pad(self.l_exc_l4_l3, (pad_amount, pad_amount, pad_amount, pad_amount))
+                self.slicing_var[:, 4:5] = le_padded_l4_l3
+
+        n_channels = 3 if self.microcolumnar else 2
+        if layer_3:
+            n_channels = 5 if self.microcolumnar else 4
+
+        sliced_interactions = self.slicing_var[self.batch_indices, :n_channels, self.final_row_indices, self.final_col_indices]
 
         se_crops = sliced_interactions[:,:,:,:,0]
         i_crops = sliced_interactions[:,:,:,:,1]
-        le_crops = sliced_interactions[:,:,:,:,2]
-        le_crops_l3 = sliced_interactions[:,:,:,:,3]
 
         if self.microcolumnar:
             
+            le_crops = sliced_interactions[:,:,:,:,2]
+            #lat_interactions = (self.exc_b*se_crops + (1-self.exc_b)*le_crops) - i_crops
             lat_interactions = self.exc_b*se_crops + (1-self.exc_b)*le_crops - i_crops
-
-            local_int = self.exc_l3 - self.inh_l3
-            
-            l4_l3_int = (self.exc_b*se_crops + (1-self.exc_b)*le_crops_l3) - i_crops
 
         else:
 
             lat_interactions = se_crops - i_crops
 
-            local_int = self.exc_l3 - self.inh_l3
+        if layer_3:
 
-            l4_l3_int = 1.5*se_crops - i_crops
+            i_crops_l4_l3 = sliced_interactions[:,:,:,:,3]
+            local_int = self.s_exc_l3 - self.inh_l3
+
+            if self.microcolumnar:
+                l4_l3_int = 1.15*(self.exc_b*se_crops + (1-self.exc_b)*le_crops) - i_crops_l4_l3
+            else:
+                l4_l3_int = 1.5*se_crops - i_crops_l4_l3
 
 
         for i in range(self.iterations):
@@ -198,28 +224,35 @@ class NeuralSheet(nn.Module):
 
                 if i==0:
                     self.noise = torch.randn(self.current_response.shape, device=self.device) 
-                    self.noise_l3 = torch.randn(self.current_response.shape, device=self.device) 
+
+                    if layer_3:
+                        self.noise_l3 = torch.randn(self.current_response.shape, device=self.device) 
 
                 else:
                     curr_noise = torch.randn(self.current_response.shape, device=self.device) 
                     self.noise = self.noise * noise_beta + curr_noise * (1-noise_beta)
                     self.noise /= (self.noise**2).mean()**0.5
 
-                    curr_noise_l3 = torch.randn(self.current_response.shape, device=self.device) 
-                    self.noise_l3 = self.noise_l3 * noise_beta + curr_noise_l3 * (1-noise_beta)
-                    self.noise_l3 /= (self.noise_l3**2).mean()**0.5
+                    if layer_3:
+                        curr_noise_l3 = torch.randn(self.current_response.shape, device=self.device) 
+                        self.noise_l3 = self.noise_l3 * noise_beta + curr_noise_l3 * (1-noise_beta)
+                        self.noise_l3 /= (self.noise_l3**2).mean()**0.5
 
             else:
                 self.noise = 0
-                self.noise_l3 = 0
-            
+
+                if layer_3:
+                    self.noise_l3 = 0
+
             padded_response = F.pad(self.current_response, (self.window//2, self.window//2, self.window//2, self.window//2))
             res_tiles = F.unfold(padded_response, self.window)[0].T.view(-1,1,self.window,self.window)
             mex_hat = (lat_interactions * res_tiles).sum([2,3]).view(self.current_response.shape) 
+            
             lateral_delta = mex_hat * self.gains
             
             #l4_l3_exc = (((0.33*se_crops + 0.8*le_crops) - i_crops) * res_tiles).sum([2,3]).view(self.current_response.shape) #* self.balance_l3
             if layer_3:
+
                 net_afferent_l3 = (l4_l3_int * res_tiles).sum([2,3]).view(self.current_response.shape) * self.aff_strength_l3
                 
                 #if microcolumnar:
@@ -241,13 +274,13 @@ class NeuralSheet(nn.Module):
 
             if layer_3:
 
-                delta_l3 = lateral_delta_l3 * self.gains_l3
+                delta_l3 = lateral_delta_l3 * self.gains_l3 
     
                 #b = 0.95
                 #update_l3 = l4_l3_exc * (1-b) + delta_l3 * b
                 update_l3 = net_afferent_l3 + delta_l3
                 
-                self.current_response_l3 = torch.tanh(torch.relu(update_l3 - self.thresholds_l3 +  self.noise_l3 * noise_gamma)) 
+                self.current_response_l3 = torch.tanh(torch.relu(update_l3 - self.thresholds_l3 + self.noise_l3 * noise_gamma)) 
                 self.response_tracker_l3[i] = self.current_response_l3 + 0
 
         
@@ -270,7 +303,7 @@ class NeuralSheet(nn.Module):
 
             self.mean_activations = self.mean_activations*(1-self.homeo_lr) + self.current_response*self.homeo_lr
             thresh_update = (self.homeo_target - self.mean_activations) / self.homeo_target
-            self.thresholds -= thresh_update * self.homeo_lr 
+            self.thresholds -= thresh_update * self.homeo_lr
             self.thresholds = self.thresholds.clip(-1,1)
 
             if layer_3:
@@ -303,17 +336,26 @@ class NeuralSheet(nn.Module):
                 self.thresholds_l3 = self.thresholds_l3.clip(-1,1)
             
                         
-    def hebbian_step(self):
+    def hebbian_step(self, layer_3=None):
+
+        if layer_3 is None:
+            layer_3 = getattr(self, '_last_layer_3', False)
 
         self.step(self.afferent_weights, self.current_tiles, self.current_response.view(-1,1,1,1))
         self.step(self.lateral_correlations, self.current_response, self.current_response.view(-1,1,1,1))
         thresh = 0.04
         self.step(self.lateral_correlations_exc, self.current_response, (self.current_response.view(-1,1,1,1) - thresh), unlearning=0e-3)
 
+        if not layer_3:
+            return
+
         self.step(self.afferent_weights_l3, self.current_tiles_l3, self.current_response_l3.view(-1,1,1,1))
         self.step(self.lateral_correlations_l3, self.current_response_l3, 4*self.current_response_l3.view(-1,1,1,1))
 
-        thresh = 0.08
+        self.step(self.lateral_correlations_l4_l3, self.current_response, self.current_response_l3.view(-1,1,1,1))
+        self.step(self.lateral_correlations_exc_l4_l3, self.current_response, 4*self.current_response_l3.view(-1,1,1,1) - thresh)
+
+        thresh = 0.06
         
         #s = 4
         #w = torch.exp(- s * torch.linspace(0, 1, self.iterations, device=self.device)).view(-1,1,1,1)
@@ -345,41 +387,49 @@ class NeuralSheet(nn.Module):
         return aff_weights
         
 
-    def update_interactions(self):
+    def update_interactions(self, layer_3=True):
 
         self.inh = self.i_cutoff * self.lateral_correlations
         self.inh /= self.inh.sum([2,3], keepdim=True)
-
-        self.inh_l3 = self.i_cutoff * self.lateral_correlations_l3
-        self.inh_l3 /= self.inh_l3.sum([2,3], keepdim=True)
-
-        self.exc_l3 = self.se_cutoff #* self.lateral_correlations_l3
-        self.exc_l3 /= self.exc_l3.sum([2,3], keepdim=True)
 
         self.s_exc = self.se_cutoff #* self.lateral_correlations
         self.s_exc /= self.s_exc.sum([2,3], keepdim=True)
 
         if self.microcolumnar:
 
-            self.l_exc = self.le_cutoff * self.lateral_correlations_exc #* self.lat_sparsity
-            self.l_exc /= self.l_exc.sum([2,3], keepdim=True) + 1e-11
+            self.l_exc = self.le_cutoff * self.lateral_correlations_exc + 1e-11 #* self.lat_sparsity
+            self.l_exc /= (self.l_exc).sum([2,3], keepdim=True)
 
-            self.l_exc_l3 = self.le_cutoff * self.lateral_correlations_exc
-            self.l_exc_l3 /= self.l_exc_l3.sum([2,3], keepdim=True) + 1e-11
+        if not layer_3:
+            return
 
-            #adjust = self.le_cutoff.sum([1,2,3], keepdim=True)
-            #adjust /= adjust.max()
-            #self.l_exc *= adjust
+        self.inh_l3 = self.i_cutoff * self.lateral_correlations_l3
+        self.inh_l3 /= self.inh_l3.sum([2,3], keepdim=True)
+
+        self.inh_l4_l3 = self.i_cutoff * self.lateral_correlations_l4_l3
+        self.inh_l4_l3 /= self.inh_l4_l3.sum([2,3], keepdim=True)
+
+        self.s_exc_l3 = self.se_cutoff * self.loc_lat_sparsity + 1e-11 * self.eye
+        self.s_exc_l3 /= self.s_exc_l3.sum([2,3], keepdim=True)
+
+        if self.microcolumnar:
+
+            self.l_exc_l4_l3 = self.le_cutoff * self.lateral_correlations_exc_l4_l3
+            self.l_exc_l4_l3 /= self.l_exc_l4_l3.sum([2,3], keepdim=True) + 1e-11
+
+            self.l_exc_l3 = self.le_cutoff * self.lateral_correlations_exc_l3 * self.lat_sparsity + 1e-11
+            self.l_exc_l3 /= (self.l_exc_l3).sum([2,3], keepdim=True)
             
-        
+
+        # not using it because it breaks sparsity
         adjust = (self.lateral_correlations_exc_l3**2).sum([1,2,3], keepdim=True)
         adjust /= adjust.mean()
 
         self.global_exc_l3 = self.lateral_correlations_exc_l3 * self.lat_sparsity + 1e-11
-        self.global_exc_l3 /= (self.global_exc_l3).sum([1,2,3], keepdim=True) * adjust
+        self.global_exc_l3 /= (self.global_exc_l3).sum([1,2,3], keepdim=True) #* adjust
         
         self.global_inh_l3 = self.lateral_correlations_l3 * self.lat_sparsity + 1e-11
-        self.global_inh_l3 /= (self.global_inh_l3).sum([1,2,3], keepdim=True) * adjust
+        self.global_inh_l3 /= (self.global_inh_l3).sum([1,2,3], keepdim=True) #* adjust
 
 
     def init_indices(self):
